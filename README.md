@@ -55,6 +55,162 @@ docker run -d -p 8000:8000 \
 docker run -d -p 8000:8000 --env-file .env lucky-box-ai
 ```
 
+## 接口文档
+
+### POST /analyze_inventory_intent
+
+分析微信群聊上下文，识别客户意图并提取关键信息。
+
+**请求体**
+
+```json
+{
+  "before_messages": [
+    {"type": "text", "content": "前面的文本消息"},
+    {"type": "image", "url": "https://example.com/image.jpg"}
+  ],
+  "at_message": {"type": "text", "content": "@AI 有现货吗？"},
+  "after_messages": []
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `before_messages` | Message[] | 否 | @AI 消息之前的上下文（最多2条） |
+| `at_message` | Message | 是 | @AI 的消息本身 |
+| `after_messages` | Message[] | 否 | @AI 消息之后的上下文（最多2条） |
+
+Message 结构：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | `"text"` 或 `"image"` |
+| `content` | string | 文本内容（type 为 text 时） |
+| `url` | string | 图片 URL（type 为 image 时） |
+
+> 当消息中包含图片时，自动使用 vision 模型处理；纯文本则使用文本模型。
+
+**响应体**
+
+查物流：
+```json
+{"intent": "query_logistics", "status": "success", "order_no": "SF1234567890"}
+{"intent": "query_logistics", "status": "no_tracking_no"}
+```
+
+查库存：
+```json
+{"intent": "query_inventory", "status": "success", "item_code": "01028", "item_name": "宝可梦睡姿明盒"}
+{"intent": "query_inventory", "status": "no_info_extracted"}
+```
+
+其他意图：
+```json
+{"intent": "not_sure_intent"}
+```
+
+错误响应（LLM 调用失败时透传错误信息）：
+```json
+{"error": "错误描述"}
+```
+
+### 时序图
+
+#### 查物流流程
+
+```plantuml
+@startuml
+title 响应客户查物流需求 (简化业务逻辑版)
+
+actor "用户" as User
+participant "微信服务商" as WechatService
+participant "后端" as Backend
+participant "AI端" as AI
+
+autonumber
+
+User -> WechatService: @AI 查物流
+WechatService -> Backend: 转发消息通知
+activate Backend
+
+note over Backend: 等待6秒获取上下文\n(前2条 + @消息 + 后2条)
+
+Backend -> WechatService: 获取完整上下文消息
+WechatService --> Backend: 返回文本列表
+
+Backend -> AI: /analyze_inventory_intent (发送上下文)
+activate AI
+
+alt 意图识别为"查物流"
+
+    alt 提取到物流单号
+        AI --> Backend: {"intent": "query_logistics", \n "status": "success", \n "order_no": "1213"}
+        Backend -> WechatService: 回复：订单详情
+    else 未提取到物流单号
+        AI --> Backend: {"intent": "query_logistics", \n "status": "no_tracking_no"}
+        Backend -> WechatService: 回复：未提供单号，请人工同事跟进
+    end
+
+else 识别为其他意图
+    AI --> Backend: {"intent": "not_sure_intent"}
+end
+
+deactivate AI
+WechatService -> User: 推送最终回复消息
+deactivate Backend
+
+@enduml
+```
+
+#### 查库存流程
+
+```plantuml
+@startuml
+title 响应客户查库存需求
+
+actor "用户" as User
+participant "微信服务商" as WechatService
+participant "后端" as Backend
+participant "AI端" as AI
+
+autonumber
+
+User -> WechatService: @AI 查库存 (发送文本/图片)
+WechatService -> Backend: 转发消息通知
+activate Backend
+
+note over Backend: 等待6秒获取上下文\n(前2条 + @消息 + 后2条)\n含文本及图片URL
+
+Backend -> WechatService: 获取完整上下文消息
+WechatService --> Backend: 返回消息列表 (Text/Image)
+
+Backend -> AI: /analyze_inventory_intent (上下文内容)
+activate AI
+
+alt 意图识别为"查库存"
+
+    alt 提取到商品编码或名称
+        AI --> Backend: {"intent": "query_inventory", \n"status": "success", \n "item_code": "...", "item_name": "..."}
+
+        Backend -> Backend: 查询库存
+        Backend --> WechatService: 回复内容
+
+    else 未提取到关键信息
+        AI --> Backend: {"intent": "query_inventory", \n"status": "no_info_extracted"}
+        Backend -> WechatService: 回复：未提供商品编码或名称，请人工同事跟进
+    end
+
+else 其他意图
+    AI --> Backend: {"intent": "not_sure_intent"}
+end
+
+deactivate AI
+WechatService -> User: 推送最终回复消息
+deactivate Backend
+
+@enduml
+```
+
 ## 测试
 
 ### 单元测试
