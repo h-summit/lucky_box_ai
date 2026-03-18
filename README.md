@@ -1,6 +1,6 @@
 # Lucky Box AI
 
-微信群聊客服意图识别服务。通过 LLM 识别客户意图（查物流/查库存），提取关键信息供后端调用。
+微信群聊客服 AI 服务。通过 LLM 识别客户意图（查物流/查库存），并生成打招呼、节日问候、客情维护等客服回复语，供后端调用。
 
 ## 配置
 
@@ -112,6 +112,101 @@ Message 结构：
 错误响应（LLM 调用失败时透传错误信息）：
 ```json
 {"error": "错误描述"}
+```
+
+### POST /greetings
+
+生成打招呼回复语。
+
+**请求体**
+
+```json
+{
+  "prompt": "给新客户打一段招呼语",
+  "product_info": "主营宝可梦周边、盲盒、手办，支持批发和零售"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `prompt` | string | 是 | 打招呼提示词 |
+| `product_info` | string | 是 | 产品和业务信息 |
+
+**响应体**
+
+```json
+{
+  "response": "您好呀，我们这边主营宝可梦周边，最近有不少现货新品，您可以告诉我想看哪一类。"
+}
+```
+
+### POST /holiday_greetings
+
+生成节日问候回复语。
+
+**请求体**
+
+```json
+{
+  "holiday": "中秋节",
+  "time_now": "2026-09-17 10:00:00",
+  "history": [
+    {"role": "user", "content": "上次那批宝可梦睡姿还有吗"},
+    {"role": "assistant", "content": "部分款还有现货，您要的话我可以给您整理"}
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `holiday` | string | 是 | 节日名称 |
+| `time_now` | string | 是 | 当前时间 |
+| `history` | HistoryMessage[] | 否 | 历史对话 |
+
+HistoryMessage 结构：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `role` | string | `"user"` 或 `"assistant"` |
+| `content` | string | 对话内容 |
+
+**响应体**
+
+```json
+{
+  "response": "中秋快乐，感谢您一直以来的支持，祝您阖家团圆，最近想看的款式也可以随时发我。"
+}
+```
+
+### POST /customer_relationship_management
+
+生成客情维护回复语。
+
+**请求体**
+
+```json
+{
+  "time_delay": "距离上次联系已过去30天",
+  "time_now": "2026-03-18 15:30:00",
+  "history": [
+    {"role": "user", "content": "上次发我的新品图我看到了"},
+    {"role": "assistant", "content": "好的，您有想重点了解的系列可以随时告诉我"}
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `time_delay` | string | 是 | 截止上次接触到现在过去了多久 |
+| `time_now` | string | 是 | 当前时间 |
+| `history` | HistoryMessage[] | 否 | 历史对话 |
+
+**响应体**
+
+```json
+{
+  "response": "这段时间一直没打扰您，最近我们这边到了一批新款宝可梦周边，您如果想看新品我可以给您发一版清单。"
+}
 ```
 
 ### 时序图
@@ -342,3 +437,50 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 ```
 
 期望返回：`intent: "query_logistics"`, `status: "success"`, `order_no: "YT9876543210"`。
+
+**9. 打招呼**
+
+```bash
+curl -X POST http://localhost:8000/greetings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "给新客户打一段招呼语",
+    "product_info": "主营宝可梦周边、盲盒、手办，支持批发和零售"
+  }'
+```
+
+期望返回：`response` 为一段可直接发送给客户的打招呼内容。
+
+**10. 节日问候回复语**
+
+```bash
+curl -X POST http://localhost:8000/holiday_greetings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "holiday": "中秋节",
+    "time_now": "2026-09-17 10:00:00",
+    "history": [
+      {"role": "user", "content": "上次那批宝可梦睡姿还有吗"},
+      {"role": "assistant", "content": "部分款还有现货，您要的话我可以给您整理"}
+    ]
+  }'
+```
+
+期望返回：`response` 为一段节日问候内容。
+
+**11. 客情维护回复语**
+
+```bash
+curl -X POST http://localhost:8000/customer_relationship_management \
+  -H "Content-Type: application/json" \
+  -d '{
+    "time_delay": "距离上次联系已过去30天",
+    "time_now": "2026-03-18 15:30:00",
+    "history": [
+      {"role": "user", "content": "上次发我的新品图我看到了"},
+      {"role": "assistant", "content": "好的，您有想重点了解的系列可以随时告诉我"}
+    ]
+  }'
+```
+
+期望返回：`response` 为一段客情维护内容。

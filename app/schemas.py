@@ -23,3 +23,29 @@ class AnalyzeResponse(BaseModel):
     order_no: Optional[str] = None
     item_code: Optional[str] = None
     item_name: Optional[str] = None
+
+
+class GreetingsRequest(BaseModel):
+    prompt: str
+    product_info: str
+
+
+class HistoryMessage(BaseModel):
+    role: str
+    content: str
+
+
+class HolidayGreetingsRequest(BaseModel):
+    holiday: str
+    time_now: str
+    history: list[HistoryMessage] = []
+
+
+class CustomerRelationshipManagementRequest(BaseModel):
+    time_delay: str
+    time_now: str
+    history: list[HistoryMessage] = []
+
+
+class ReplyResponse(BaseModel):
+    response: str

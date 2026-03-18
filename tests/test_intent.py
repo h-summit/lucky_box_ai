@@ -2,12 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-client = TestClient(app)
+from app.main import analyze_inventory_intent
+from app.schemas import AnalyzeRequest, Message
 
 
 def _mock_llm_response(content: str):
@@ -32,17 +28,15 @@ def test_query_logistics_with_order_no(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [],
-        "at_message": {"type": "text", "content": "@AI 帮我查一下物流 SF1234567890"},
-        "after_messages": [],
-    })
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 帮我查一下物流 SF1234567890"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "query_logistics"
-    assert data["status"] == "success"
-    assert data["order_no"] == "SF1234567890"
+    assert resp.intent == "query_logistics"
+    assert resp.status == "success"
+    assert resp.order_no == "SF1234567890"
 
 
 @patch("app.llm.OpenAI")
@@ -54,16 +48,14 @@ def test_query_logistics_no_order_no(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [],
-        "at_message": {"type": "text", "content": "@AI 我的快递到哪了"},
-        "after_messages": [],
-    })
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 我的快递到哪了"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "query_logistics"
-    assert data["status"] == "no_tracking_no"
+    assert resp.intent == "query_logistics"
+    assert resp.status == "no_tracking_no"
 
 
 # ---- 查库存（纯文本） ----
@@ -77,17 +69,15 @@ def test_query_inventory_text_success(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [],
-        "at_message": {"type": "text", "content": "@AI 宝可梦睡姿明盒有货吗？"},
-        "after_messages": [],
-    })
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 宝可梦睡姿明盒有货吗？"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "query_inventory"
-    assert data["status"] == "success"
-    assert data["item_name"] == "宝可梦睡姿明盒"
+    assert resp.intent == "query_inventory"
+    assert resp.status == "success"
+    assert resp.item_name == "宝可梦睡姿明盒"
 
 
 @patch("app.llm.OpenAI")
@@ -99,16 +89,14 @@ def test_query_inventory_text_no_info(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [],
-        "at_message": {"type": "text", "content": "@AI 有货吗"},
-        "after_messages": [],
-    })
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 有货吗"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "query_inventory"
-    assert data["status"] == "no_info_extracted"
+    assert resp.intent == "query_inventory"
+    assert resp.status == "no_info_extracted"
 
 
 # ---- 查库存（含图片） ----
@@ -122,18 +110,16 @@ def test_query_inventory_with_image(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [
-            {"type": "image", "url": "https://img.pokemondb.net/artwork/large/pikachu.jpg"},
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[
+            Message(type="image", url="https://img.pokemondb.net/artwork/large/pikachu.jpg"),
         ],
-        "at_message": {"type": "text", "content": "@AI 有货吗"},
-        "after_messages": [],
-    })
+        at_message=Message(type="text", content="@AI 有货吗"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "query_inventory"
-    assert data["item_code"] == "01028"
+    assert resp.intent == "query_inventory"
+    assert resp.item_code == "01028"
 
     # 验证使用了 vision 模型配置
     call_kwargs = mock_client.chat.completions.create.call_args
@@ -153,20 +139,18 @@ def test_not_sure_intent(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = client.post("/analyze_inventory_intent", json={
-        "before_messages": [],
-        "at_message": {"type": "text", "content": "@AI 你好"},
-        "after_messages": [],
-    })
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 你好"),
+        after_messages=[],
+    ))
 
-    assert resp.status_code == 200
-    assert resp.json()["intent"] == "not_sure_intent"
+    assert resp.intent == "not_sure_intent"
 
 
 # ---- 辅助函数单元测试 ----
 
-from app.llm import _has_image, _build_user_text, _build_user_content
-from app.schemas import AnalyzeRequest, Message
+from app.llm import _build_user_content, _build_user_text, _has_image
 
 
 def test_has_image_true():

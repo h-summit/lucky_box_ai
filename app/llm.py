@@ -3,8 +3,18 @@ import json
 from openai import OpenAI
 
 from app.config import settings
-from app.prompts import SYSTEM_PROMPT
-from app.schemas import AnalyzeRequest
+from app.prompts import (
+    CUSTOMER_RELATIONSHIP_MANAGEMENT_SYSTEM_PROMPT,
+    GREETINGS_SYSTEM_PROMPT,
+    HOLIDAY_GREETINGS_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+)
+from app.schemas import (
+    AnalyzeRequest,
+    CustomerRelationshipManagementRequest,
+    GreetingsRequest,
+    HolidayGreetingsRequest,
+)
 
 
 def _has_image(request: AnalyzeRequest) -> bool:
@@ -48,23 +58,19 @@ def _build_user_text(request: AnalyzeRequest) -> str:
     return "\n".join(lines)
 
 
-def analyze_intent(request: AnalyzeRequest) -> dict:
-    """调用 LLM 分析意图，根据是否有图片选择不同模型。"""
-    use_vision = _has_image(request)
-
+def _call_llm(system_prompt: str, user_content, use_vision: bool = False) -> dict:
+    """调用 LLM 并解析 JSON 响应。"""
     if use_vision:
         client = OpenAI(base_url=settings.vision_llm_base_url, api_key=settings.vision_llm_api_key)
         model = settings.vision_llm_model
-        user_content = _build_user_content(request)
     else:
         client = OpenAI(base_url=settings.text_llm_base_url, api_key=settings.text_llm_api_key)
         model = settings.text_llm_model
-        user_content = _build_user_text(request)
 
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         temperature=0,
@@ -72,3 +78,33 @@ def analyze_intent(request: AnalyzeRequest) -> dict:
 
     raw = response.choices[0].message.content.strip()
     return json.loads(raw)
+
+
+def analyze_intent(request: AnalyzeRequest) -> dict:
+    """调用 LLM 分析意图，根据是否有图片选择不同模型。"""
+    use_vision = _has_image(request)
+
+    if use_vision:
+        user_content = _build_user_content(request)
+    else:
+        user_content = _build_user_text(request)
+
+    return _call_llm(SYSTEM_PROMPT, user_content, use_vision=use_vision)
+
+
+def generate_greetings(request: GreetingsRequest) -> dict:
+    """调用文本模型生成打招呼回复语。"""
+    user_content = json.dumps(request.model_dump(), ensure_ascii=False)
+    return _call_llm(GREETINGS_SYSTEM_PROMPT, user_content)
+
+
+def generate_holiday_greetings(request: HolidayGreetingsRequest) -> dict:
+    """调用文本模型生成节日问候回复语。"""
+    user_content = json.dumps(request.model_dump(), ensure_ascii=False)
+    return _call_llm(HOLIDAY_GREETINGS_SYSTEM_PROMPT, user_content)
+
+
+def generate_customer_relationship_management(request: CustomerRelationshipManagementRequest) -> dict:
+    """调用文本模型生成客情维护回复语。"""
+    user_content = json.dumps(request.model_dump(), ensure_ascii=False)
+    return _call_llm(CUSTOMER_RELATIONSHIP_MANAGEMENT_SYSTEM_PROMPT, user_content)
