@@ -37,6 +37,26 @@ uvicorn app.main:app --reload
 
 ## Docker 部署
 
+### 国内服务器配置镜像加速（首次部署）
+
+国内服务器无法直接拉取 Docker Hub 镜像，需先配置加速器：
+
+```bash
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://mirror.ccs.tencentyun.com",
+    "https://docker.1ms.run",
+    "https://docker.xuanyuan.me"
+  ]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+### 构建与运行
+
 ```bash
 # 构建镜像
 docker build -t lucky-box-ai .
