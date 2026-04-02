@@ -33,10 +33,12 @@ def _handle_json_request(handler: Callable, request):
 
 
 def _normalize_inventory_result(result: dict) -> dict:
-    if result.get("intent") != "query_inventory" or result.get("status") != "success":
-        return result
-
     normalized = dict(result)
+    if normalized.get("intent") != "query_inventory" or normalized.get("status") != "success":
+        normalized.pop("item_code", None)
+        normalized.pop("item_name", None)
+        return normalized
+
     raw_items = normalized.get("items")
     if raw_items is None:
         raw_items = [{
@@ -72,12 +74,23 @@ def _normalize_inventory_result(result: dict) -> dict:
     return normalized
 
 
+def _minimize_analyze_result(result: dict) -> dict:
+    minimized = {"intent": result["intent"]}
+    if "status" in result and result["status"] is not None:
+        minimized["status"] = result["status"]
+    if "order_no" in result and result["order_no"] is not None:
+        minimized["order_no"] = result["order_no"]
+    if "items" in result and result["items"] is not None:
+        minimized["items"] = result["items"]
+    return minimized
+
+
 @app.post("/analyze_inventory_intent", response_model=AnalyzeResponse)
 def analyze_inventory_intent(request: AnalyzeRequest):
     result = _handle_json_request(analyze_intent, request)
     if isinstance(result, JSONResponse):
         return result
-    return AnalyzeResponse(**_normalize_inventory_result(result))
+    return AnalyzeResponse(**_minimize_analyze_result(_normalize_inventory_result(result)))
 
 
 @app.post("/greetings", response_model=ReplyResponse)

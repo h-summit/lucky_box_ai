@@ -114,24 +114,28 @@ Message 结构：
 
 查物流：
 ```json
-{"intent": "query_logistics", "status": "success", "order_no": "SF1234567890", "items": null}
-{"intent": "query_logistics", "status": "no_tracking_no", "order_no": null, "items": null}
+{"intent": "query_logistics", "status": "success", "order_no": "SF1234567890"}
+{"intent": "query_logistics", "status": "no_tracking_no"}
 ```
 
 查库存：
 ```json
-{"intent": "query_inventory", "status": "success", "order_no": null, "items": [{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}]}
-{"intent": "query_inventory", "status": "success", "order_no": null, "items": [{"item_code": "0102250"}, {"item_code": "0100700"}]}
-{"intent": "query_inventory", "status": "no_info_extracted", "order_no": null, "items": null}
+{"intent": "query_inventory", "status": "success", "items": [{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}]}
+{"intent": "query_inventory", "status": "success", "items": [{"item_code": "0102250"}, {"item_code": "0100700"}]}
+{"intent": "query_inventory", "status": "no_info_extracted"}
 ```
 
-格式说明：
+获取报价单：
+```json
+{"intent": "get_quote", "status": "success"}
+```
+
+查库存格式说明：
 
 ```json
 {
   "intent": "query_inventory",
   "status": "success",
-  "order_no": null,
   "items": [
     {
       "item_code": "商品编码，可选",
@@ -141,19 +145,19 @@ Message 结构：
 }
 ```
 
-> 查库存成功时，接口对外统一返回 `items` 数组。服务内部兼容 LLM 旧格式 `item_code` / `item_name`，会自动归一化为 `items`，但 API 响应不再保证返回顶层 `item_code` / `item_name`。
+> `/analyze_inventory_intent` 现在按意图返回最小字段集合，不再附带无关的 `null` 字段。
 >
 > `items` 中每个元素表示一个商品对象，可包含 `item_code`、`item_name`，未识别到的字段会省略。
 >
 > 当 `intent = "query_inventory"` 且 `status = "success"` 时，返回 `items`。
 >
-> 当前响应模型固定包含 `order_no`、`items` 字段；当该字段不适用于当前意图时，返回 `null`。
+> 当 `intent = "query_inventory"` 且 `status = "no_info_extracted"` 时，不返回 `items`。
 >
-> 当 `intent = "query_inventory"` 且 `status = "no_info_extracted"` 时，返回 `"items": null`。
+> 当 `intent = "get_quote"` 且 `status = "success"` 时，只返回 `intent` 和 `status`。
 
 其他意图：
 ```json
-{"intent": "not_sure_intent", "status": null, "order_no": null, "items": null}
+{"intent": "not_sure_intent"}
 ```
 
 错误响应（LLM 调用失败时透传错误信息）：
@@ -342,6 +346,9 @@ alt 意图识别为"查库存"
         Backend -> WechatService: 回复：未提供商品编码或名称，请人工同事跟进
     end
 
+else 识别为获取报价单
+    AI --> Backend: {"intent": "get_quote", \n"status": "success"}
+
 else 其他意图
     AI --> Backend: {"intent": "not_sure_intent"}
 end
@@ -452,6 +459,34 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：`intent: "query_inventory"`, `status: "success"`，且 `items` 中包含从图片中提取的商品信息。
 
+**7. 获取报价单**
+
+```bash
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "before_messages": [],
+    "at_message": {"type": "text", "content": "@AI 发一下报价单"},
+    "after_messages": []
+  }'
+```
+
+期望返回：`intent: "get_quote"`, `status: "success"`。
+
+**8. 获取报价单优先级 - 同时提到库存和报价单**
+
+```bash
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "before_messages": [],
+    "at_message": {"type": "text", "content": "@AI 这个有货吗，顺便发下报价单"},
+    "after_messages": []
+  }'
+```
+
+期望返回：`intent: "get_quote"`, `status: "success"`。
+
 ### curl 本地图片集成测试
 
 在仓库根目录运行，直接使用本地图片 `0.png`、`4.png`、`7.png` 测试新的 `items` 返回结构：
@@ -510,7 +545,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 - `4.png`：`intent: "query_inventory"`，`status: "success"`，且 `items` 至少包含 `0102250`
 - `7.png`：`intent: "query_inventory"`，`status: "success"`，且 `items` 至少包含 `0100700`
 
-**7. 其他意图**
+**9. 其他意图**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -524,7 +559,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：`intent: "not_sure_intent"`。
 
-**8. 完整上下文（前文 + @消息 + 后续消息）**
+**10. 完整上下文（前文 + @消息 + 后续消息）**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -543,7 +578,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：`intent: "query_logistics"`, `status: "success"`, `order_no: "YT9876543210"`。
 
-**9. 打招呼**
+**11. 打招呼**
 
 ```bash
 curl -X POST http://localhost:8000/greetings \
@@ -556,7 +591,7 @@ curl -X POST http://localhost:8000/greetings \
 
 期望返回：`response` 为一段可直接发送给客户的打招呼内容。
 
-**10. 节日问候回复语**
+**12. 节日问候回复语**
 
 ```bash
 curl -X POST http://localhost:8000/holiday_greetings \
@@ -573,7 +608,7 @@ curl -X POST http://localhost:8000/holiday_greetings \
 
 期望返回：`response` 为一段节日问候内容。
 
-**11. 客情维护回复语**
+**13. 客情维护回复语**
 
 ```bash
 curl -X POST http://localhost:8000/customer_relationship_management \

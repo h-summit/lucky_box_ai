@@ -37,6 +37,7 @@ def test_query_logistics_with_order_no(mock_openai_cls):
     assert resp.intent == "query_logistics"
     assert resp.status == "success"
     assert resp.order_no == "SF1234567890"
+    assert resp.items is None
 
 
 @patch("app.llm.OpenAI")
@@ -56,6 +57,8 @@ def test_query_logistics_no_order_no(mock_openai_cls):
 
     assert resp.intent == "query_logistics"
     assert resp.status == "no_tracking_no"
+    assert resp.order_no is None
+    assert resp.items is None
 
 
 # ---- 查库存（纯文本） ----
@@ -123,6 +126,7 @@ def test_query_inventory_text_no_info(mock_openai_cls):
 
     assert resp.intent == "query_inventory"
     assert resp.status == "no_info_extracted"
+    assert resp.order_no is None
     assert resp.items is None
 
 
@@ -206,6 +210,48 @@ def test_query_inventory_with_image_json_fence(mock_openai_cls):
     assert resp.items[0].item_code == "0100700"
 
 
+@patch("app.llm.OpenAI")
+def test_get_quote_success(mock_openai_cls):
+    """客户明确要报价单，应识别为 get_quote。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '{"intent": "get_quote", "status": "success"}'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 发一下报价单"),
+        after_messages=[],
+    ))
+
+    assert resp.intent == "get_quote"
+    assert resp.status == "success"
+    assert resp.order_no is None
+    assert resp.items is None
+
+
+@patch("app.llm.OpenAI")
+def test_get_quote_priority_over_inventory(mock_openai_cls):
+    """同时提到库存和报价单时，应优先识别为 get_quote。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '{"intent": "get_quote", "status": "success"}'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 这个有货吗，顺便发下报价单"),
+        after_messages=[],
+    ))
+
+    assert resp.intent == "get_quote"
+    assert resp.status == "success"
+    assert resp.order_no is None
+    assert resp.items is None
+
+
 # ---- 其他意图 ----
 
 @patch("app.llm.OpenAI")
@@ -224,6 +270,9 @@ def test_not_sure_intent(mock_openai_cls):
     ))
 
     assert resp.intent == "not_sure_intent"
+    assert resp.status is None
+    assert resp.order_no is None
+    assert resp.items is None
 
 
 # ---- 辅助函数单元测试 ----
