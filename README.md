@@ -8,6 +8,7 @@
 
 | 变量 | 说明 |
 |------|------|
+| `PORT` | 服务监听端口 |
 | `TEXT_LLM_BASE_URL` | 纯文本模型 API 地址 |
 | `TEXT_LLM_API_KEY` | 纯文本模型 Key |
 | `TEXT_LLM_MODEL` | 纯文本模型名称 |
@@ -30,10 +31,13 @@ cp .env.example .env
 # 编辑 .env 填入实际的 API Key 等配置
 
 # 启动开发服务器（热重载）
-uvicorn app.main:app --reload
+set -a
+source .env
+set +a
+uvicorn app.main:app --reload --host 0.0.0.0 --port "${PORT}"
 ```
 
-访问 http://localhost:8000/docs 查看接口文档。
+访问 `http://localhost:$PORT/docs` 查看接口文档。
 
 ## Docker 部署
 
@@ -63,6 +67,7 @@ docker build -t lucky-box-ai .
 
 # 运行（通过环境变量传入配置）
 docker run -d -p 8000:8000 \
+  -e PORT=8000 \
   -e TEXT_LLM_BASE_URL=https://api.openai.com/v1 \
   -e TEXT_LLM_API_KEY=sk-xxx \
   -e TEXT_LLM_MODEL=gpt-4o \
@@ -71,8 +76,13 @@ docker run -d -p 8000:8000 \
   -e VISION_LLM_MODEL=gpt-4o \
   lucky-box-ai
 
-# 或使用 .env 文件
-docker run -d -p 8000:8000 --env-file .env lucky-box-ai
+# 或使用 .env 文件控制端口和模型配置
+cp .env.example .env
+# 编辑 .env
+set -a
+source .env
+set +a
+docker run -d -p "${PORT}:${PORT}" --env-file .env lucky-box-ai
 ```
 
 ## 接口文档
