@@ -21,6 +21,12 @@ from app.schemas import (
 )
 
 app = FastAPI(title="Lucky Box AI")
+INTENT_ORDER = {
+    "query_logistics": 0,
+    "query_inventory": 1,
+    "get_quote": 2,
+    "not_sure_intent": 3,
+}
 
 
 def _handle_json_request(handler: Callable, request):
@@ -30,6 +36,14 @@ def _handle_json_request(handler: Callable, request):
         return JSONResponse(status_code=e.status_code, content={"error": str(e.message)})
     except json.JSONDecodeError as e:
         return JSONResponse(status_code=502, content={"error": f"LLM 返回了非 JSON 内容: {e.doc}"})
+
+
+def _coerce_results(result) -> list[dict]:
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if isinstance(result, dict):
+        return [result]
+    return []
 
 
 def _normalize_inventory_result(result: dict) -> dict:
@@ -68,29 +82,132 @@ def _normalize_inventory_result(result: dict) -> dict:
         seen.add(key)
         items.append(item)
 
-    normalized["items"] = items or None
+    if items:
+        normalized["items"] = items
+    else:
+        normalized["status"] = "no_info_extracted"
+        normalized.pop("items", None)
     normalized.pop("item_code", None)
     normalized.pop("item_name", None)
     return normalized
 
 
+def _merge_logistics_result(current: dict | None, candidate: dict) -> dict:
+    if current is None:
+        return candidate
+
+    current_has_order = bool(current.get("order_no"))
+    candidate_has_order = bool(candidate.get("order_no"))
+    if candidate_has_order and not current_has_order:
+        return candidate
+    if candidate_has_order == current_has_order and candidate.get("status") == "success" and current.get("status") != "success":
+        return candidate
+    return current
+
+
+def _merge_inventory_result(current: dict | None, candidate: dict) -> dict:
+    if current is None:
+        return candidate
+
+    current_items = current.get("items") or []
+    candidate_items = candidate.get("items") or []
+    merged_items = []
+    seen = set()
+
+    for item in [*current_items, *candidate_items]:
+        if not isinstance(item, dict):
+            continue
+        key = tuple(sorted(item.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_items.append(item)
+
+    if merged_items:
+        return {
+            "intent": "query_inventory",
+            "status": "success",
+            "items": merged_items,
+        }
+
+    return current if current.get("status") == "no_info_extracted" else candidate
+
+
+def _merge_results(results: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+
+    for result in results:
+        intent = result.get("intent")
+        if not intent:
+            continue
+
+        if intent == "query_logistics":
+            candidate = {"intent": "query_logistics"}
+            if result.get("status") is not None:
+                candidate["status"] = result["status"]
+            if result.get("order_no"):
+                candidate["order_no"] = result["order_no"]
+            merged[intent] = _merge_logistics_result(merged.get(intent), candidate)
+            continue
+
+        if intent == "query_inventory":
+            candidate = {"intent": "query_inventory"}
+            if result.get("status") is not None:
+                candidate["status"] = result["status"]
+            if result.get("items") is not None:
+                candidate["items"] = result["items"]
+            merged[intent] = _merge_inventory_result(merged.get(intent), candidate)
+            continue
+
+        if intent == "get_quote":
+            merged[intent] = {"intent": "get_quote", "status": "success"}
+            continue
+
+        if intent == "not_sure_intent":
+            merged.setdefault(intent, {"intent": "not_sure_intent"})
+            continue
+
+        merged[intent] = result
+
+    concrete_intents = [intent for intent in merged if intent != "not_sure_intent"]
+    if concrete_intents:
+        merged.pop("not_sure_intent", None)
+
+    if not merged:
+        return [{"intent": "not_sure_intent"}]
+
+    return sorted(
+        merged.values(),
+        key=lambda item: INTENT_ORDER.get(item["intent"], len(INTENT_ORDER)),
+    )
+
+
 def _minimize_analyze_result(result: dict) -> dict:
     minimized = {"intent": result["intent"]}
-    if "status" in result and result["status"] is not None:
+    if result.get("status") is not None:
         minimized["status"] = result["status"]
-    if "order_no" in result and result["order_no"] is not None:
+    if result.get("order_no") is not None:
         minimized["order_no"] = result["order_no"]
-    if "items" in result and result["items"] is not None:
+    if result.get("items") is not None:
         minimized["items"] = result["items"]
     return minimized
 
 
-@app.post("/analyze_inventory_intent", response_model=AnalyzeResponse)
+def _normalize_analyze_results(result) -> list[dict]:
+    normalized_results = [_normalize_inventory_result(item) for item in _coerce_results(result)]
+    return [_minimize_analyze_result(item) for item in _merge_results(normalized_results)]
+
+
+@app.post(
+    "/analyze_inventory_intent",
+    response_model=list[AnalyzeResponse],
+    response_model_exclude_none=True,
+)
 def analyze_inventory_intent(request: AnalyzeRequest):
     result = _handle_json_request(analyze_intent, request)
     if isinstance(result, JSONResponse):
         return result
-    return AnalyzeResponse(**_minimize_analyze_result(_normalize_inventory_result(result)))
+    return [AnalyzeResponse(**item) for item in _normalize_analyze_results(result)]
 
 
 @app.post("/greetings", response_model=ReplyResponse)
