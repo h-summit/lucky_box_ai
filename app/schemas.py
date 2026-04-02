@@ -17,12 +17,16 @@ class AnalyzeRequest(BaseModel):
     after_messages: list[Message] = []
 
 
+class InventoryItem(BaseModel):
+    item_code: Optional[str] = None
+    item_name: Optional[str] = None
+
+
 class AnalyzeResponse(BaseModel):
     intent: str  # "query_logistics" | "query_inventory" | "not_sure_intent"
     status: Optional[str] = None  # "success" | "no_tracking_no" | "no_info_extracted"
     order_no: Optional[str] = None
-    item_code: Optional[str] = None
-    item_name: Optional[str] = None
+    items: Optional[list[InventoryItem]] = None
 
 
 class GreetingsRequest(BaseModel):

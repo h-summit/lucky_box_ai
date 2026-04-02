@@ -114,19 +114,46 @@ Message 结构：
 
 查物流：
 ```json
-{"intent": "query_logistics", "status": "success", "order_no": "SF1234567890"}
-{"intent": "query_logistics", "status": "no_tracking_no"}
+{"intent": "query_logistics", "status": "success", "order_no": "SF1234567890", "items": null}
+{"intent": "query_logistics", "status": "no_tracking_no", "order_no": null, "items": null}
 ```
 
 查库存：
 ```json
-{"intent": "query_inventory", "status": "success", "item_code": "01028", "item_name": "宝可梦睡姿明盒"}
-{"intent": "query_inventory", "status": "no_info_extracted"}
+{"intent": "query_inventory", "status": "success", "order_no": null, "items": [{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}]}
+{"intent": "query_inventory", "status": "success", "order_no": null, "items": [{"item_code": "0102250"}, {"item_code": "0100700"}]}
+{"intent": "query_inventory", "status": "no_info_extracted", "order_no": null, "items": null}
 ```
+
+格式说明：
+
+```json
+{
+  "intent": "query_inventory",
+  "status": "success",
+  "order_no": null,
+  "items": [
+    {
+      "item_code": "商品编码，可选",
+      "item_name": "商品名称，可选"
+    }
+  ]
+}
+```
+
+> 查库存成功时，接口对外统一返回 `items` 数组。服务内部兼容 LLM 旧格式 `item_code` / `item_name`，会自动归一化为 `items`，但 API 响应不再保证返回顶层 `item_code` / `item_name`。
+>
+> `items` 中每个元素表示一个商品对象，可包含 `item_code`、`item_name`，未识别到的字段会省略。
+>
+> 当 `intent = "query_inventory"` 且 `status = "success"` 时，返回 `items`。
+>
+> 当前响应模型固定包含 `order_no`、`items` 字段；当该字段不适用于当前意图时，返回 `null`。
+>
+> 当 `intent = "query_inventory"` 且 `status = "no_info_extracted"` 时，返回 `"items": null`。
 
 其他意图：
 ```json
-{"intent": "not_sure_intent"}
+{"intent": "not_sure_intent", "status": null, "order_no": null, "items": null}
 ```
 
 错误响应（LLM 调用失败时透传错误信息）：
@@ -305,7 +332,7 @@ activate AI
 alt 意图识别为"查库存"
 
     alt 提取到商品编码或名称
-        AI --> Backend: {"intent": "query_inventory", \n"status": "success", \n "item_code": "...", "item_name": "..."}
+        AI --> Backend: {"intent": "query_inventory", \n"status": "success", \n "items": [{"item_code": "...", "item_name": "..."}, {"item_code": "..."}]}
 
         Backend -> Backend: 查询库存
         Backend --> WechatService: 回复内容
@@ -379,7 +406,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
   }'
 ```
 
-期望返回：`intent: "query_inventory"`, `status: "success"`, `item_name: "宝可梦睡姿明盒"`。
+期望返回：`intent: "query_inventory"`, `status: "success"`，且 `items[0].item_name = "宝可梦睡姿明盒"`。
 
 **4. 查库存 - 纯文本，提取到商品编码**
 
@@ -393,7 +420,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
   }'
 ```
 
-期望返回：`intent: "query_inventory"`, `status: "success"`, `item_code: "01028"`。
+期望返回：`intent: "query_inventory"`, `status: "success"`，且 `items[0].item_code = "01028"`。
 
 **5. 查库存 - 纯文本，未提取到商品信息**
 
@@ -423,7 +450,65 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
   }'
 ```
 
-期望返回：`intent: "query_inventory"`, `status: "success"`, 包含从图片中提取的商品信息。
+期望返回：`intent: "query_inventory"`, `status: "success"`，且 `items` 中包含从图片中提取的商品信息。
+
+### curl 本地图片集成测试
+
+在仓库根目录运行，直接使用本地图片 `0.png`、`4.png`、`7.png` 测试新的 `items` 返回结构：
+
+```bash
+img0=$(base64 -w 0 0.png)
+cat > /tmp/lucky_box_0.json <<EOF
+{
+  "before_messages": [
+    {"type": "image", "url": "data:image/png;base64,${img0}"}
+  ],
+  "at_message": {"type": "text", "content": "这两个有货吗"},
+  "after_messages": []
+}
+EOF
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/lucky_box_0.json
+```
+
+```bash
+img4=$(base64 -w 0 4.png)
+cat > /tmp/lucky_box_4.json <<EOF
+{
+  "before_messages": [
+    {"type": "image", "url": "data:image/png;base64,${img4}"}
+  ],
+  "at_message": {"type": "text", "content": "这个有货吗"},
+  "after_messages": []
+}
+EOF
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/lucky_box_4.json
+```
+
+```bash
+img7=$(base64 -w 0 7.png)
+cat > /tmp/lucky_box_7.json <<EOF
+{
+  "before_messages": [
+    {"type": "image", "url": "data:image/png;base64,${img7}"}
+  ],
+  "at_message": {"type": "text", "content": "这个有货吗"},
+  "after_messages": []
+}
+EOF
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/lucky_box_7.json
+```
+
+期望返回：
+
+- `0.png`：`intent: "query_inventory"`，`status: "success"`，且 `items` 至少包含 `0102250`、`0100700`
+- `4.png`：`intent: "query_inventory"`，`status: "success"`，且 `items` 至少包含 `0102250`
+- `7.png`：`intent: "query_inventory"`，`status: "success"`，且 `items` 至少包含 `0100700`
 
 **7. 其他意图**
 

@@ -65,6 +65,29 @@ def test_query_inventory_text_success(mock_openai_cls):
     """客户查库存（纯文本），提取到商品信息。"""
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '{"intent": "query_inventory", "status": "success", "items": [{"item_name": "宝可梦睡姿明盒"}]}'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 宝可梦睡姿明盒有货吗？"),
+        after_messages=[],
+    ))
+
+    assert resp.intent == "query_inventory"
+    assert resp.status == "success"
+    assert resp.items is not None
+    assert len(resp.items) == 1
+    assert resp.items[0].item_name == "宝可梦睡姿明盒"
+    assert resp.items[0].item_code is None
+
+
+@patch("app.llm.OpenAI")
+def test_query_inventory_text_success_legacy_shape(mock_openai_cls):
+    """客户查库存（纯文本），兼容旧的单商品返回结构。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
         '{"intent": "query_inventory", "status": "success", "item_code": "", "item_name": "宝可梦睡姿明盒"}'
     )
     mock_openai_cls.return_value = mock_client
@@ -77,7 +100,10 @@ def test_query_inventory_text_success(mock_openai_cls):
 
     assert resp.intent == "query_inventory"
     assert resp.status == "success"
-    assert resp.item_name == "宝可梦睡姿明盒"
+    assert resp.items is not None
+    assert len(resp.items) == 1
+    assert resp.items[0].item_name == "宝可梦睡姿明盒"
+    assert resp.items[0].item_code is None
 
 
 @patch("app.llm.OpenAI")
@@ -97,6 +123,7 @@ def test_query_inventory_text_no_info(mock_openai_cls):
 
     assert resp.intent == "query_inventory"
     assert resp.status == "no_info_extracted"
+    assert resp.items is None
 
 
 # ---- 查库存（含图片） ----
@@ -106,7 +133,7 @@ def test_query_inventory_with_image(mock_openai_cls):
     """客户查库存，前文消息包含图片，应使用 vision 模型。"""
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _mock_llm_response(
-        '{"intent": "query_inventory", "status": "success", "item_code": "01028", "item_name": "宝可梦睡姿明盒"}'
+        '{"intent": "query_inventory", "status": "success", "items": [{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}]}'
     )
     mock_openai_cls.return_value = mock_client
 
@@ -119,13 +146,64 @@ def test_query_inventory_with_image(mock_openai_cls):
     ))
 
     assert resp.intent == "query_inventory"
-    assert resp.item_code == "01028"
+    assert resp.items is not None
+    assert len(resp.items) == 1
+    assert resp.items[0].item_code == "01028"
+    assert resp.items[0].item_name == "宝可梦睡姿明盒"
 
     # 验证使用了 vision 模型配置
     call_kwargs = mock_client.chat.completions.create.call_args
     user_content = call_kwargs.kwargs["messages"][1]["content"]
     assert isinstance(user_content, list)  # vision 格式是 list
     assert any(p.get("type") == "image_url" for p in user_content)
+
+
+@patch("app.llm.OpenAI")
+def test_query_inventory_with_multiple_items(mock_openai_cls):
+    """客户查库存，图片中包含多个商品，应返回多个商品对象。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '{"intent": "query_inventory", "status": "success", "items": [{"item_code": "0102250"}, {"item_code": "0100700"}, {"item_code": "0102250"}]}'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[
+            Message(type="image", url="https://example.com/multi-items.png"),
+        ],
+        at_message=Message(type="text", content="@AI 这两个有货吗"),
+        after_messages=[],
+    ))
+
+    assert resp.intent == "query_inventory"
+    assert resp.status == "success"
+    assert resp.items is not None
+    assert len(resp.items) == 2
+    assert {item.item_code for item in resp.items} == {"0102250", "0100700"}
+
+
+@patch("app.llm.OpenAI")
+def test_query_inventory_with_image_json_fence(mock_openai_cls):
+    """客户查库存，兼容 LLM 返回 Markdown 代码块包裹的 JSON。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '```json\n{"intent": "query_inventory", "status": "success", "items": [{"item_code": "0100700"}]}\n```'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[
+            Message(type="image", url="https://example.com/fenced-json.png"),
+        ],
+        at_message=Message(type="text", content="@AI 这个有货吗"),
+        after_messages=[],
+    ))
+
+    assert resp.intent == "query_inventory"
+    assert resp.status == "success"
+    assert resp.items is not None
+    assert len(resp.items) == 1
+    assert resp.items[0].item_code == "0100700"
 
 
 # ---- 其他意图 ----
@@ -150,7 +228,7 @@ def test_not_sure_intent(mock_openai_cls):
 
 # ---- 辅助函数单元测试 ----
 
-from app.llm import _build_user_content, _build_user_text, _has_image
+from app.llm import _build_user_content, _build_user_text, _has_image, _parse_llm_json
 
 
 def test_has_image_true():
@@ -190,3 +268,8 @@ def test_build_user_content_with_image():
     types = [p["type"] for p in parts]
     assert "image_url" in types
     assert "text" in types
+
+
+def test_parse_llm_json_with_markdown_fence():
+    data = _parse_llm_json('```json\n{"intent": "not_sure_intent"}\n```')
+    assert data == {"intent": "not_sure_intent"}

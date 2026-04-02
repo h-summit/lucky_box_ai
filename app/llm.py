@@ -58,6 +58,19 @@ def _build_user_text(request: AnalyzeRequest) -> str:
     return "\n".join(lines)
 
 
+def _parse_llm_json(raw: str) -> dict:
+    """兼容解析被 Markdown 代码块包裹的 JSON。"""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        first_newline = raw.find("\n")
+        if first_newline != -1:
+            raw = raw[first_newline + 1:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+    return json.loads(raw)
+
+
 def _call_llm(system_prompt: str, user_content, use_vision: bool = False) -> dict:
     """调用 LLM 并解析 JSON 响应。"""
     if use_vision:
@@ -77,7 +90,7 @@ def _call_llm(system_prompt: str, user_content, use_vision: bool = False) -> dic
     )
 
     raw = response.choices[0].message.content.strip()
-    return json.loads(raw)
+    return _parse_llm_json(raw)
 
 
 def analyze_intent(request: AnalyzeRequest) -> dict:
