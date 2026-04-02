@@ -2,6 +2,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    port: int = 8000
+
     # 纯文本模型
     text_llm_base_url: str = ""
     text_llm_api_key: str = ""
