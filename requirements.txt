@@ -5,3 +5,5 @@ pydantic-settings
 python-dotenv
 pytest
 httpx
+alibabacloud-imagesearch20201214
+alibabacloud-tea-openapi

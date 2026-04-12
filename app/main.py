@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from openai import APIError
 
+from app.image_index import InventoryImageIndexTaskService
 from app.llm import (
     analyze_intent,
     generate_customer_relationship_management,
@@ -17,10 +18,14 @@ from app.schemas import (
     CustomerRelationshipManagementRequest,
     GreetingsRequest,
     HolidayGreetingsRequest,
+    InventoryImageIndexTaskCreateRequest,
+    InventoryImageIndexTaskCreateResponse,
+    InventoryImageIndexTaskDetailResponse,
     ReplyResponse,
 )
 
 app = FastAPI(title="Lucky Box AI")
+image_index_task_service = InventoryImageIndexTaskService()
 INTENT_ORDER = {
     "query_logistics": 0,
     "query_inventory": 1,
@@ -198,6 +203,11 @@ def _normalize_analyze_results(result) -> list[dict]:
     return [_minimize_analyze_result(item) for item in _merge_results(normalized_results)]
 
 
+def _json_error(status_code: int, message: str) -> JSONResponse:
+    """统一输出简单错误响应。"""
+    return JSONResponse(status_code=status_code, content={"error": message})
+
+
 @app.post(
     "/analyze_inventory_intent",
     response_model=list[AnalyzeResponse],
@@ -208,6 +218,40 @@ def analyze_inventory_intent(request: AnalyzeRequest):
     if isinstance(result, JSONResponse):
         return result
     return [AnalyzeResponse(**item) for item in _normalize_analyze_results(result)]
+
+
+@app.post(
+    "/inventory_image_index/tasks",
+    response_model=InventoryImageIndexTaskCreateResponse,
+    status_code=202,
+)
+def create_inventory_image_index_task(request: InventoryImageIndexTaskCreateRequest):
+    """创建图片检索库异步入库任务。"""
+    if not request.products:
+        return _json_error(400, "products 不能为空")
+
+    task = image_index_task_service.create_task(request.products)
+    image_index_task_service.start_task(task["task_id"])
+    return InventoryImageIndexTaskCreateResponse(
+        task_id=task["task_id"],
+        status=task["status"],
+        total_product_count=task["total_product_count"],
+        submitted_image_count=task["submitted_image_count"],
+        ignored_empty_image_count=task["ignored_empty_image_count"],
+        created_at=task["created_at"],
+    )
+
+
+@app.get(
+    "/inventory_image_index/tasks/{task_id}",
+    response_model=InventoryImageIndexTaskDetailResponse,
+)
+def get_inventory_image_index_task(task_id: str):
+    """查询图片检索库异步入库任务的执行结果。"""
+    task = image_index_task_service.get_task(task_id)
+    if task is None:
+        return _json_error(404, "task_id 不存在")
+    return InventoryImageIndexTaskDetailResponse(**task)
 
 
 @app.post("/greetings", response_model=ReplyResponse)
