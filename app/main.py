@@ -28,9 +28,10 @@ app = FastAPI(title="Lucky Box AI")
 image_index_task_service = InventoryImageIndexTaskService()
 INTENT_ORDER = {
     "query_logistics": 0,
-    "query_inventory": 1,
-    "get_quote": 2,
-    "not_sure_intent": 3,
+    "query_shipping_progress": 1,
+    "query_inventory": 2,
+    "get_quote": 3,
+    "not_sure_intent": 4,
 }
 
 
@@ -147,12 +148,23 @@ def _merge_results(results: list[dict]) -> list[dict]:
             continue
 
         if intent == "query_logistics":
+            # 兼容旧提示词仍返回 no_tracking_no 的情况，对外统一提升为独立的发货进度意图。
+            if result.get("status") == "no_tracking_no":
+                merged["query_shipping_progress"] = {
+                    "intent": "query_shipping_progress",
+                    "status": "success",
+                }
+                continue
             candidate = {"intent": "query_logistics"}
             if result.get("status") is not None:
                 candidate["status"] = result["status"]
             if result.get("order_no"):
                 candidate["order_no"] = result["order_no"]
             merged[intent] = _merge_logistics_result(merged.get(intent), candidate)
+            continue
+
+        if intent == "query_shipping_progress":
+            merged[intent] = {"intent": "query_shipping_progress", "status": "success"}
             continue
 
         if intent == "query_inventory":

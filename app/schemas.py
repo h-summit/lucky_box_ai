@@ -23,8 +23,8 @@ class InventoryItem(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    intent: str  # "query_logistics" | "query_inventory" | "get_quote" | "not_sure_intent"
-    status: Optional[str] = None  # "success" | "no_tracking_no" | "no_info_extracted"
+    intent: str  # "query_logistics" | "query_shipping_progress" | "query_inventory" | "get_quote" | "not_sure_intent"
+    status: Optional[str] = None  # "success" | "no_info_extracted"
     order_no: Optional[str] = None
     items: Optional[list[InventoryItem]] = None
 

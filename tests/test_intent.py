@@ -43,11 +43,11 @@ def test_query_logistics_with_order_no(mock_openai_cls):
 
 
 @patch("app.llm.OpenAI")
-def test_query_logistics_no_order_no(mock_openai_cls):
-    """客户查物流，但未提供物流单号。"""
+def test_query_shipping_progress(mock_openai_cls):
+    """客户问发货进度但没给单号时，应返回独立发货进度意图。"""
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _mock_llm_response(
-        '[{"intent": "query_logistics", "status": "no_tracking_no"}]'
+        '[{"intent": "query_shipping_progress", "status": "success"}]'
     )
     mock_openai_cls.return_value = mock_client
 
@@ -58,8 +58,30 @@ def test_query_logistics_no_order_no(mock_openai_cls):
     ))
 
     assert len(resp) == 1
-    assert resp[0].intent == "query_logistics"
-    assert resp[0].status == "no_tracking_no"
+    assert resp[0].intent == "query_shipping_progress"
+    assert resp[0].status == "success"
+    assert resp[0].order_no is None
+    assert resp[0].items is None
+
+
+@patch("app.llm.OpenAI")
+def test_query_logistics_no_order_no_legacy_shape(mock_openai_cls):
+    """兼容旧格式的 no_tracking_no，并对外统一成发货进度意图。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '[{"intent": "query_logistics", "status": "no_tracking_no"}]'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 发货了没"),
+        after_messages=[],
+    ))
+
+    assert len(resp) == 1
+    assert resp[0].intent == "query_shipping_progress"
+    assert resp[0].status == "success"
     assert resp[0].order_no is None
     assert resp[0].items is None
 
@@ -280,6 +302,26 @@ def test_query_logistics_and_get_quote_order(mock_openai_cls):
 
     assert [item.intent for item in resp] == ["query_logistics", "get_quote"]
     assert resp[0].order_no == "SF1234567890"
+    assert resp[1].status == "success"
+
+
+@patch("app.llm.OpenAI")
+def test_query_shipping_progress_and_get_quote_order(mock_openai_cls):
+    """多意图包含发货进度时，应按固定顺序输出。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '[{"intent": "get_quote", "status": "success"}, {"intent": "query_shipping_progress", "status": "success"}]'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    resp = analyze_inventory_intent(AnalyzeRequest(
+        before_messages=[],
+        at_message=Message(type="text", content="@AI 我的货到哪了，再发一下报价单"),
+        after_messages=[],
+    ))
+
+    assert [item.intent for item in resp] == ["query_shipping_progress", "get_quote"]
+    assert resp[0].status == "success"
     assert resp[1].status == "success"
 
 

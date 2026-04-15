@@ -1,6 +1,6 @@
 # Lucky Box AI
 
-微信群聊客服 AI 服务。通过 LLM 识别客户意图（查物流/查库存），并生成打招呼、节日问候、客情维护等客服回复语，供后端调用。
+微信群聊客服 AI 服务。通过 LLM 识别客户意图（查物流、查发货进度、查库存），并生成打招呼、节日问候、客情维护等客服回复语，供后端调用。
 
 ## 配置
 
@@ -127,8 +127,12 @@ Message 结构：
 [
   {"intent": "query_logistics", "status": "success", "order_no": "SF1234567890"}
 ]
+```
+
+查发货进度：
+```json
 [
-  {"intent": "query_logistics", "status": "no_tracking_no"}
+  {"intent": "query_shipping_progress", "status": "success"}
 ]
 ```
 
@@ -156,6 +160,10 @@ Message 结构：
 ```json
 [
   {"intent": "query_logistics", "status": "success", "order_no": "SF1234567890"},
+  {"intent": "get_quote", "status": "success"}
+]
+[
+  {"intent": "query_shipping_progress", "status": "success"},
   {"intent": "get_quote", "status": "success"}
 ]
 [
@@ -193,7 +201,7 @@ Message 结构：
 >
 > 同类意图只返回一次。`query_inventory` 的多个商品聚合在同一个 `items` 数组里。
 >
-> 如果同时识别到多个意图，固定按 `query_logistics` → `query_inventory` → `get_quote` 的顺序返回。
+> 如果同时识别到多个意图，固定按 `query_logistics` → `query_shipping_progress` → `query_inventory` → `get_quote` 的顺序返回。
 >
 > 只有一个明确意图都没识别到时，才返回 `[{"intent": "not_sure_intent"}]`。
 
@@ -310,7 +318,7 @@ HistoryMessage 结构：
 
 ```plantuml
 @startuml
-title 响应客户查物流需求 (简化业务逻辑版)
+title 响应客户物流相关需求 (简化业务逻辑版)
 
 actor "用户" as User
 participant "微信服务商" as WechatService
@@ -319,7 +327,7 @@ participant "AI端" as AI
 
 autonumber
 
-User -> WechatService: @AI 查物流
+User -> WechatService: @AI 询问物流或发货进度
 WechatService -> Backend: 转发消息通知
 activate Backend
 
@@ -336,10 +344,11 @@ alt 意图识别为"查物流"
     alt 提取到物流单号
         AI --> Backend: {"intent": "query_logistics", \n "status": "success", \n "order_no": "1213"}
         Backend -> WechatService: 回复：订单详情
-    else 未提取到物流单号
-        AI --> Backend: {"intent": "query_logistics", \n "status": "no_tracking_no"}
-        Backend -> WechatService: 回复：未提供单号，请人工同事跟进
     end
+
+else 意图识别为"查发货进度"
+    AI --> Backend: {"intent": "query_shipping_progress", \n "status": "success"}
+    Backend -> WechatService: 回复：进入发货进度处理流程
 
 else 识别为其他意图
     AI --> Backend: {"intent": "not_sure_intent"}
@@ -378,7 +387,7 @@ Backend -> AI: /analyze_inventory_intent (上下文内容)
 activate AI
 
 alt 识别到一个或多个意图
-    AI --> Backend: [{"intent": "query_logistics", \n"status": "success", \n"order_no": "..."}, \n{"intent": "query_inventory", \n"status": "success", \n"items": [{"item_code": "..."}, {"item_code": "..."}]}, \n{"intent": "get_quote", \n"status": "success"}]
+    AI --> Backend: [{"intent": "query_logistics", \n"status": "success", \n"order_no": "..."}, \n{"intent": "query_shipping_progress", \n"status": "success"}, \n{"intent": "query_inventory", \n"status": "success", \n"items": [{"item_code": "..."}, {"item_code": "..."}]}, \n{"intent": "get_quote", \n"status": "success"}]
     Backend -> Backend: 按返回结果逐项处理
 
 else 其他意图
@@ -419,7 +428,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：数组长度为 1，且第 1 项 `intent: "query_logistics"`、`status: "success"`、`order_no` 包含单号。
 
-**2. 查物流 - 未提供单号**
+**2. 查发货进度 - 未提供单号**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -431,7 +440,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
   }'
 ```
 
-期望返回：数组长度为 1，且第 1 项 `intent: "query_logistics"`、`status: "no_tracking_no"`。
+期望返回：数组长度为 1，且第 1 项 `intent: "query_shipping_progress"`、`status: "success"`。
 
 **3. 查库存 - 纯文本，提取到商品名称**
 
@@ -533,7 +542,21 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：数组长度为 2，且依次为 `query_logistics`、`get_quote`。
 
-**10. 查物流 + 查库存 + 获取报价单**
+**10. 查发货进度 + 获取报价单**
+
+```bash
+curl -X POST http://localhost:8000/analyze_inventory_intent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "before_messages": [],
+    "at_message": {"type": "text", "content": "@AI 我的货到哪了，再发一下报价单"},
+    "after_messages": []
+  }'
+```
+
+期望返回：数组长度为 2，且依次为 `query_shipping_progress`、`get_quote`。
+
+**11. 查物流 + 查库存 + 获取报价单**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -605,7 +628,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 - `4.png`：数组长度为 1，第 1 项 `intent: "query_inventory"`，且 `items` 至少包含 `0102250`
 - `7.png`：数组长度为 1，第 1 项 `intent: "query_inventory"`，且 `items` 至少包含 `0100700`
 
-**11. 其他意图**
+**12. 其他意图**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -619,7 +642,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：数组长度为 1，且第 1 项 `intent: "not_sure_intent"`。
 
-**12. 完整上下文（前文 + @消息 + 后续消息）**
+**13. 完整上下文（前文 + @消息 + 后续消息）**
 
 ```bash
 curl -X POST http://localhost:8000/analyze_inventory_intent \
@@ -638,7 +661,7 @@ curl -X POST http://localhost:8000/analyze_inventory_intent \
 
 期望返回：数组长度为 1，且第 1 项 `intent: "query_logistics"`、`status: "success"`、`order_no: "YT9876543210"`。
 
-**13. 打招呼**
+**14. 打招呼**
 
 ```bash
 curl -X POST http://localhost:8000/greetings \
@@ -651,7 +674,7 @@ curl -X POST http://localhost:8000/greetings \
 
 期望返回：`response` 为一段可直接发送给客户的打招呼内容。
 
-**14. 节日问候回复语**
+**15. 节日问候回复语**
 
 ```bash
 curl -X POST http://localhost:8000/holiday_greetings \
@@ -668,7 +691,7 @@ curl -X POST http://localhost:8000/holiday_greetings \
 
 期望返回：`response` 为一段节日问候内容。
 
-**15. 客情维护回复语**
+**16. 客情维护回复语**
 
 ```bash
 curl -X POST http://localhost:8000/customer_relationship_management \
