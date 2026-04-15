@@ -65,8 +65,11 @@ sudo systemctl restart docker
 # 构建镜像
 docker build -t lucky-box-ai .
 
+# 启动前先删除旧容器；如果容器不存在，忽略报错
+docker rm -f lucky-box-ai 2>/dev/null || true
+
 # 运行（通过环境变量传入配置）
-docker run -d -p 8000:8000 \
+docker run -d --name lucky-box-ai --restart unless-stopped -p 8000:8000 \
   -e PORT=8000 \
   -e TEXT_LLM_BASE_URL=https://api.openai.com/v1 \
   -e TEXT_LLM_API_KEY=sk-xxx \
@@ -82,7 +85,8 @@ cp .env.example .env
 set -a
 source .env
 set +a
-docker run -d -p "${PORT}:${PORT}" --env-file .env lucky-box-ai
+docker rm -f lucky-box-ai 2>/dev/null || true
+docker run -d --name lucky-box-ai --restart unless-stopped -p "${PORT}:${PORT}" --env-file .env lucky-box-ai
 ```
 
 ## 接口文档
