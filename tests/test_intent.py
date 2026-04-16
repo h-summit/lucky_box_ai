@@ -159,6 +159,72 @@ def test_query_inventory_text_no_info(mock_openai_cls):
 
 
 @patch("app.llm.OpenAI")
+def test_query_inventory_image_search_backfills_items(mock_openai_cls):
+    """查库存没提取到商品时，应补充图片检索命中的商品。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '[{"intent": "query_inventory", "status": "no_info_extracted"}]'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    with patch(
+        "app.main.inventory_image_search_service.search_inventory_items",
+        return_value=[{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}],
+    ) as mock_search:
+        resp = analyze_inventory_intent(AnalyzeRequest(
+            before_messages=[
+                Message(type="image", url="https://example.com/query.png"),
+            ],
+            at_message=Message(type="text", content="@AI 这个有货吗"),
+            after_messages=[],
+        ))
+
+    mock_search.assert_called_once_with(["https://example.com/query.png"])
+    assert len(resp) == 1
+    assert resp[0].intent == "query_inventory"
+    assert resp[0].status == "success"
+    assert resp[0].items is not None
+    assert len(resp[0].items) == 1
+    assert resp[0].items[0].item_code == "01028"
+    assert resp[0].items[0].item_name == "宝可梦睡姿明盒"
+
+
+@patch("app.llm.OpenAI")
+def test_query_inventory_image_search_merges_conflicting_items(mock_openai_cls):
+    """图片检索结果与 LLM 提取冲突时，应一起返回。"""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _mock_llm_response(
+        '[{"intent": "query_inventory", "status": "success", "items": [{"item_code": "01028", "item_name": "宝可梦睡姿明盒"}]}]'
+    )
+    mock_openai_cls.return_value = mock_client
+
+    with patch(
+        "app.main.inventory_image_search_service.search_inventory_items",
+        return_value=[
+            {"item_code": "0100700", "item_name": "宝可梦立牌"},
+            {"item_code": "01028", "item_name": "宝可梦睡姿明盒"},
+        ],
+    ):
+        resp = analyze_inventory_intent(AnalyzeRequest(
+            before_messages=[
+                Message(type="image", url="https://example.com/conflict.png"),
+            ],
+            at_message=Message(type="text", content="@AI 这个有货吗"),
+            after_messages=[],
+        ))
+
+    assert len(resp) == 1
+    assert resp[0].intent == "query_inventory"
+    assert resp[0].status == "success"
+    assert resp[0].items is not None
+    assert len(resp[0].items) == 2
+    assert {(item.item_code, item.item_name) for item in resp[0].items} == {
+        ("01028", "宝可梦睡姿明盒"),
+        ("0100700", "宝可梦立牌"),
+    }
+
+
+@patch("app.llm.OpenAI")
 def test_query_inventory_with_image(mock_openai_cls):
     """客户查库存，前文消息包含图片，应使用 vision 模型。"""
     mock_client = MagicMock()
@@ -167,13 +233,14 @@ def test_query_inventory_with_image(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = analyze_inventory_intent(AnalyzeRequest(
-        before_messages=[
-            Message(type="image", url="https://img.pokemondb.net/artwork/large/pikachu.jpg"),
-        ],
-        at_message=Message(type="text", content="@AI 有货吗"),
-        after_messages=[],
-    ))
+    with patch("app.main.inventory_image_search_service.search_inventory_items", return_value=[]):
+        resp = analyze_inventory_intent(AnalyzeRequest(
+            before_messages=[
+                Message(type="image", url="https://img.pokemondb.net/artwork/large/pikachu.jpg"),
+            ],
+            at_message=Message(type="text", content="@AI 有货吗"),
+            after_messages=[],
+        ))
 
     assert len(resp) == 1
     assert resp[0].intent == "query_inventory"
@@ -197,13 +264,14 @@ def test_query_inventory_with_multiple_items(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = analyze_inventory_intent(AnalyzeRequest(
-        before_messages=[
-            Message(type="image", url="https://example.com/multi-items.png"),
-        ],
-        at_message=Message(type="text", content="@AI 这两个有货吗"),
-        after_messages=[],
-    ))
+    with patch("app.main.inventory_image_search_service.search_inventory_items", return_value=[]):
+        resp = analyze_inventory_intent(AnalyzeRequest(
+            before_messages=[
+                Message(type="image", url="https://example.com/multi-items.png"),
+            ],
+            at_message=Message(type="text", content="@AI 这两个有货吗"),
+            after_messages=[],
+        ))
 
     assert len(resp) == 1
     assert resp[0].intent == "query_inventory"
@@ -222,13 +290,14 @@ def test_query_inventory_with_image_json_fence(mock_openai_cls):
     )
     mock_openai_cls.return_value = mock_client
 
-    resp = analyze_inventory_intent(AnalyzeRequest(
-        before_messages=[
-            Message(type="image", url="https://example.com/fenced-json.png"),
-        ],
-        at_message=Message(type="text", content="@AI 这个有货吗"),
-        after_messages=[],
-    ))
+    with patch("app.main.inventory_image_search_service.search_inventory_items", return_value=[]):
+        resp = analyze_inventory_intent(AnalyzeRequest(
+            before_messages=[
+                Message(type="image", url="https://example.com/fenced-json.png"),
+            ],
+            at_message=Message(type="text", content="@AI 这个有货吗"),
+            after_messages=[],
+        ))
 
     assert len(resp) == 1
     assert resp[0].intent == "query_inventory"

@@ -15,6 +15,10 @@
 | `VISION_LLM_BASE_URL` | 图片问答模型 API 地址 |
 | `VISION_LLM_API_KEY` | 图片问答模型 Key |
 | `VISION_LLM_MODEL` | 图片问答模型名称 |
+| `BAIDU_IMAGE_SEARCH_API_KEY` | 百度图片搜索 API Key |
+| `BAIDU_IMAGE_SEARCH_SECRET_KEY` | 百度图片搜索 Secret Key |
+| `BAIDU_IMAGE_SEARCH_BASE_URL` | 百度图片搜索 API 地址 |
+| `BAIDU_IMAGE_SEARCH_MAPPING_DB_PATH` | 百度图片映射 SQLite 文件路径 |
 
 ## 开发部署
 
@@ -123,6 +127,8 @@ Message 结构：
 | `url` | string | 图片 URL（type 为 image 时） |
 
 > 当消息中包含图片时，自动使用 vision 模型处理；纯文本则使用文本模型。
+>
+> 如果识别到 `query_inventory`，且请求里包含图片，服务还会额外调用百度商品图片检索。检索结果只保留 `score >= 0.85` 的候选，并按分数取前 `3` 个；只有 `code` 和 `name` 都非空时才会补充到 `items` 中。若与 LLM/OCR 提取结果冲突，则合并返回。
 
 **响应体**
 

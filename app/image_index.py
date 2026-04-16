@@ -19,6 +19,8 @@ IMAGE_FIELD_TO_TYPE = {
     "middle_package_picture_url": "middle_package",
 }
 AUTH_ERROR_CODES = {6, 13, 14, 15, 100, 110, 111}
+IMAGE_SEARCH_SCORE_THRESHOLD = 0.85
+IMAGE_SEARCH_TOP_N = 3
 
 
 class ImageIndexError(Exception):
@@ -112,6 +114,15 @@ class ImageIndexMapping:
     updated_at: str
 
 
+@dataclass
+class BaiduProductSearchHit:
+    """百度商品检索返回的一条候选结果。"""
+
+    score: float
+    brief: str
+    cont_sign: str = ""
+
+
 class ImageIndexMappingStore(Protocol):
     """图片映射存储协议，便于测试时替换实现。"""
 
@@ -134,12 +145,30 @@ class BaiduImageSearchApi(Protocol):
     def product_delete_by_sign(self, cont_signs: list[str]) -> None:
         """按 cont_sign 删除图片。"""
 
+    def product_search(self, image_ref: str, rn: int) -> list[BaiduProductSearchHit]:
+        """按图片检索相似商品。"""
+
 
 class ImageIndexer(Protocol):
     """图片业务索引协议，任务服务只依赖这个最小接口。"""
 
     def upsert_image(self, item: ImageIndexItem) -> None:
         """按业务主键执行图片同步。"""
+
+
+def _build_search_payload(image_ref: str, rn: int) -> dict[str, str]:
+    """统一构造百度搜图请求参数，兼容公网 URL 和 data URL。"""
+    payload = {"rn": str(rn)}
+    if image_ref.startswith("data:"):
+        comma_index = image_ref.find(",")
+        if comma_index == -1:
+            raise ImageIndexError("IMAGE_SEARCH_FAILED", "图片检索失败: data URL 格式不合法")
+        payload["image"] = image_ref[comma_index + 1:]
+        return payload
+
+    payload["url"] = image_ref
+    return payload
+
 
 def _build_brief(code: str, name: str, image_type: str) -> str:
     """统一生成百度检索时需要回传的业务摘要。"""
@@ -306,6 +335,39 @@ class BaiduImageSearchClient:
             data={"cont_sign": ",".join(cont_signs)},
             failure_code="IMAGE_DELETE_FAILED",
         )
+
+    def product_search(self, image_ref: str, rn: int) -> list[BaiduProductSearchHit]:
+        """按图片检索相似商品候选。"""
+        payload = self._call_api(
+            "/rest/2.0/image-classify/v1/realtime_search/product/search",
+            data=_build_search_payload(image_ref, rn),
+            failure_code="IMAGE_SEARCH_FAILED",
+        )
+
+        raw_results = payload.get("result")
+        if not isinstance(raw_results, list):
+            return []
+
+        hits = []
+        for raw_result in raw_results:
+            if not isinstance(raw_result, dict):
+                continue
+            try:
+                score = float(raw_result.get("score", 0))
+            except (TypeError, ValueError):
+                continue
+
+            brief = raw_result.get("brief")
+            if not isinstance(brief, str):
+                continue
+
+            hits.append(BaiduProductSearchHit(
+                score=score,
+                brief=brief,
+                cont_sign=str(raw_result.get("cont_sign") or ""),
+            ))
+
+        return hits
 
     def _call_api(self, path: str, data: dict[str, str], failure_code: str, retry_auth: bool = True) -> dict:
         """统一处理 token、HTTP 请求和百度错误码。"""
@@ -480,6 +542,65 @@ class BaiduImageIndexer:
         except ImageIndexError as exc:
             return f"; 回滚新增图片失败: {exc.message}"
         return ""
+
+
+class InventoryImageSearchService:
+    """按图片检索商品，并产出可补充到查库存结果里的商品信息。"""
+
+    def __init__(self, client: BaiduImageSearchApi | None = None):
+        """默认使用真实百度客户端，也允许测试注入假实现。"""
+        self._client = client or BaiduImageSearchClient()
+
+    def search_inventory_items(self, image_refs: list[str]) -> list[dict]:
+        """汇总多张图片的高置信度候选，只保留 code 和 name 完整的前 3 个。"""
+        best_candidates: dict[str, dict] = {}
+
+        for image_ref in image_refs:
+            for hit in self._client.product_search(image_ref, rn=IMAGE_SEARCH_TOP_N):
+                candidate = self._build_candidate(hit)
+                if candidate is None:
+                    continue
+
+                current = best_candidates.get(candidate["item_code"])
+                if current is None or candidate["score"] > current["score"]:
+                    best_candidates[candidate["item_code"]] = candidate
+
+        ranked_candidates = sorted(
+            best_candidates.values(),
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+        return [
+            {
+                "item_code": item["item_code"],
+                "item_name": item["item_name"],
+            }
+            for item in ranked_candidates[:IMAGE_SEARCH_TOP_N]
+        ]
+
+    def _build_candidate(self, hit: BaiduProductSearchHit) -> dict | None:
+        """把百度候选结果转换成库存商品候选，并执行阈值过滤。"""
+        if hit.score < IMAGE_SEARCH_SCORE_THRESHOLD:
+            return None
+
+        try:
+            brief_data = json.loads(hit.brief)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(brief_data, dict):
+            return None
+
+        code = brief_data.get("code")
+        name = brief_data.get("name")
+        if not code or not name:
+            return None
+
+        return {
+            "item_code": code,
+            "item_name": name,
+            "score": hit.score,
+        }
 
 
 class InventoryImageIndexTaskService:

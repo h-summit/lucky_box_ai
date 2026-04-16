@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from openai import APIError
 
-from app.image_index import InventoryImageIndexTaskService
+from app.image_index import ImageIndexError, InventoryImageIndexTaskService, InventoryImageSearchService
 from app.llm import (
     analyze_intent,
     generate_customer_relationship_management,
@@ -26,6 +26,7 @@ from app.schemas import (
 
 app = FastAPI(title="Lucky Box AI")
 image_index_task_service = InventoryImageIndexTaskService()
+inventory_image_search_service = InventoryImageSearchService()
 INTENT_ORDER = {
     "query_logistics": 0,
     "query_shipping_progress": 1,
@@ -53,6 +54,7 @@ def _coerce_results(result) -> list[dict]:
 
 
 def _normalize_inventory_result(result: dict) -> dict:
+    """统一整理查库存结果的结构，并清洗空商品。"""
     normalized = dict(result)
     if normalized.get("intent") != "query_inventory" or normalized.get("status") != "success":
         normalized.pop("item_code", None)
@@ -139,6 +141,46 @@ def _merge_inventory_result(current: dict | None, candidate: dict) -> dict:
     return current if current.get("status") == "no_info_extracted" else candidate
 
 
+def _collect_image_refs(request: AnalyzeRequest) -> list[str]:
+    """收集请求里的所有图片引用。"""
+    all_messages = [*request.before_messages, request.at_message, *request.after_messages]
+    return [message.url for message in all_messages if message.type == "image" and message.url]
+
+
+def _append_image_search_inventory_items(request: AnalyzeRequest, results: list[dict]) -> list[dict]:
+    """把百度图片检索命中的商品补充到查库存结果中。"""
+    if not any(result.get("intent") == "query_inventory" for result in results):
+        return results
+
+    image_refs = _collect_image_refs(request)
+    if not image_refs:
+        return results
+
+    try:
+        image_search_items = inventory_image_search_service.search_inventory_items(image_refs)
+    except ImageIndexError:
+        # 图片检索是增强能力，失败时回退到原有 LLM 结果，避免主流程不可用。
+        return results
+
+    if not image_search_items:
+        return results
+
+    enriched_results = []
+    for result in results:
+        if result.get("intent") != "query_inventory":
+            enriched_results.append(result)
+            continue
+
+        enriched_result = dict(result)
+        merged_items = list(enriched_result.get("items") or [])
+        merged_items.extend(image_search_items)
+        enriched_result["status"] = "success"
+        enriched_result["items"] = merged_items
+        enriched_results.append(enriched_result)
+
+    return enriched_results
+
+
 def _merge_results(results: list[dict]) -> list[dict]:
     merged: dict[str, dict] = {}
 
@@ -210,8 +252,11 @@ def _minimize_analyze_result(result: dict) -> dict:
     return minimized
 
 
-def _normalize_analyze_results(result) -> list[dict]:
+def _normalize_analyze_results(result, request: AnalyzeRequest) -> list[dict]:
+    """规范化 LLM 结果，并按需补充图片检索出的商品信息。"""
     normalized_results = [_normalize_inventory_result(item) for item in _coerce_results(result)]
+    normalized_results = _append_image_search_inventory_items(request, normalized_results)
+    normalized_results = [_normalize_inventory_result(item) for item in normalized_results]
     return [_minimize_analyze_result(item) for item in _merge_results(normalized_results)]
 
 
@@ -229,7 +274,7 @@ def analyze_inventory_intent(request: AnalyzeRequest):
     result = _handle_json_request(analyze_intent, request)
     if isinstance(result, JSONResponse):
         return result
-    return [AnalyzeResponse(**item) for item in _normalize_analyze_results(result)]
+    return [AnalyzeResponse(**item) for item in _normalize_analyze_results(result, request)]
 
 
 @app.post(
