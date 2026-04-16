@@ -1,7 +1,9 @@
 import json
+import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from io import BytesIO
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Protocol
 from uuid import uuid4
@@ -16,6 +18,7 @@ IMAGE_FIELD_TO_TYPE = {
     "small_package_picture_url": "small_package",
     "middle_package_picture_url": "middle_package",
 }
+AUTH_ERROR_CODES = {6, 13, 14, 15, 100, 110, 111}
 
 
 class ImageIndexError(Exception):
@@ -25,13 +28,6 @@ class ImageIndexError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
-
-
-class ImageUploader(Protocol):
-    """图片上传器协议，便于在测试里替换真实实现。"""
-
-    def add_image(self, code: str, name: str, image_type: str, image_url: str) -> None:
-        """将单张图片写入图片检索库。"""
 
 
 @dataclass
@@ -103,112 +99,395 @@ class ImageIndexTask:
         }
 
 
-class AliyunImageSearchUploader:
-    """阿里云图像搜索上传器。"""
+@dataclass
+class ImageIndexMapping:
+    """本地保存的百度图片映射。"""
 
-    def add_image(self, code: str, name: str, image_type: str, image_url: str) -> None:
-        """下载图片并调用阿里云图像搜索入库。"""
-        self._validate_settings()
-        content = self._download_image(image_url)
-        buffer = BytesIO(content)
+    code: str
+    name: str
+    image_type: str
+    source_url: str
+    brief: str
+    cont_sign: str
+    updated_at: str
+
+
+class ImageIndexMappingStore(Protocol):
+    """图片映射存储协议，便于测试时替换实现。"""
+
+    def get_mapping(self, code: str, image_type: str) -> ImageIndexMapping | None:
+        """按业务主键读取当前映射。"""
+
+    def upsert_mapping(self, mapping: ImageIndexMapping) -> None:
+        """保存或覆盖当前映射。"""
+
+
+class BaiduImageSearchApi(Protocol):
+    """百度图片搜索客户端协议，便于测试时替换实现。"""
+
+    def product_add(self, image_url: str, brief: str) -> str:
+        """按图片 URL 新增一张图片，返回百度生成的 cont_sign。"""
+
+    def product_update(self, cont_sign: str, brief: str) -> None:
+        """更新已入库图片的摘要信息。"""
+
+    def product_delete_by_sign(self, cont_signs: list[str]) -> None:
+        """按 cont_sign 删除图片。"""
+
+
+class ImageIndexer(Protocol):
+    """图片业务索引协议，任务服务只依赖这个最小接口。"""
+
+    def upsert_image(self, item: ImageIndexItem) -> None:
+        """按业务主键执行图片同步。"""
+
+def _build_brief(code: str, name: str, image_type: str) -> str:
+    """统一生成百度检索时需要回传的业务摘要。"""
+    return json.dumps(
+        {"code": code, "name": name, "image_type": image_type},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _now_iso() -> str:
+    """统一生成本地映射的更新时间。"""
+    return datetime.now().astimezone().isoformat()
+
+
+class SQLiteImageIndexMappingStore:
+    """用 SQLite 持久化保存百度 cont_sign 映射。"""
+
+    def __init__(self, db_path: str | None = None):
+        """默认使用配置中的路径，也允许测试注入临时文件。"""
+        self._db_path = Path(db_path or settings.baidu_image_search_mapping_db_path)
+        self._lock = Lock()
+        self._initialized = False
+
+    def get_mapping(self, code: str, image_type: str) -> ImageIndexMapping | None:
+        """按业务主键读取当前映射。"""
+        self._ensure_initialized()
         try:
-            request = self._build_request(code=code, name=name, image_type=image_type, buffer=buffer)
-            client = self._build_client()
-            response = client.add_image_advance(request)
-        except ModuleNotFoundError as exc:
-            raise ImageIndexError("SDK_NOT_INSTALLED", f"阿里云图像搜索 SDK 未安装: {exc}") from exc
-        except Exception as exc:  # pragma: no cover - 真实 SDK 异常类型依赖运行环境
-            raise ImageIndexError("ALIYUN_ADD_IMAGE_FAILED", f"阿里云图片入库失败: {exc}") from exc
-        finally:
-            buffer.close()
+            with self._lock, sqlite3.connect(self._db_path, timeout=30) as conn:
+                row = conn.execute(
+                    """
+                    SELECT code, name, image_type, source_url, brief, cont_sign, updated_at
+                    FROM baidu_image_index_mappings
+                    WHERE code = ? AND image_type = ?
+                    """,
+                    (code, image_type),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ImageIndexError("MAPPING_STORE_FAILED", f"读取图片映射失败: {exc}") from exc
 
-        payload = self._extract_payload(response)
-        if payload.get("Success") is not True:
-            message = payload.get("Message") or payload.get("Code") or "阿里云图片入库失败"
-            raise ImageIndexError("ALIYUN_ADD_IMAGE_FAILED", str(message))
+        if row is None:
+            return None
+        return ImageIndexMapping(
+            code=row[0],
+            name=row[1],
+            image_type=row[2],
+            source_url=row[3],
+            brief=row[4],
+            cont_sign=row[5],
+            updated_at=row[6],
+        )
 
-    def _validate_settings(self) -> None:
-        """校验阿里云图像搜索的最小配置。"""
-        missing_fields = [
-            field_name
-            for field_name, value in {
-                "aliyun_image_search_access_key_id": settings.aliyun_image_search_access_key_id,
-                "aliyun_image_search_access_key_secret": settings.aliyun_image_search_access_key_secret,
-                "aliyun_image_search_instance_name": settings.aliyun_image_search_instance_name,
-            }.items()
-            if not value
-        ]
-        if not (settings.aliyun_image_search_endpoint or settings.aliyun_image_search_region_id):
-            missing_fields.append("aliyun_image_search_endpoint")
-
-        if missing_fields:
-            raise ImageIndexError(
-                "SETTINGS_MISSING",
-                f"缺少阿里云图像搜索配置: {', '.join(missing_fields)}",
-            )
-
-    def _download_image(self, image_url: str) -> bytes:
-        """先把远端图片下载到内存，再交给阿里云 SDK。"""
+    def upsert_mapping(self, mapping: ImageIndexMapping) -> None:
+        """保存或覆盖当前映射。"""
+        self._ensure_initialized()
         try:
-            with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-                response = client.get(image_url)
+            with self._lock, sqlite3.connect(self._db_path, timeout=30) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO baidu_image_index_mappings (
+                        code, name, image_type, source_url, brief, cont_sign, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(code, image_type) DO UPDATE SET
+                        name = excluded.name,
+                        source_url = excluded.source_url,
+                        brief = excluded.brief,
+                        cont_sign = excluded.cont_sign,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        mapping.code,
+                        mapping.name,
+                        mapping.image_type,
+                        mapping.source_url,
+                        mapping.brief,
+                        mapping.cont_sign,
+                        mapping.updated_at,
+                    ),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise ImageIndexError("MAPPING_STORE_FAILED", f"保存图片映射失败: {exc}") from exc
+
+    def _ensure_initialized(self) -> None:
+        """懒创建数据库和表，避免模块导入阶段就触发副作用。"""
+        if self._initialized:
+            return
+
+        with self._lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with sqlite3.connect(self._db_path, timeout=30) as conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS baidu_image_index_mappings (
+                            code TEXT NOT NULL,
+                            name TEXT NOT NULL,
+                            image_type TEXT NOT NULL,
+                            source_url TEXT NOT NULL,
+                            brief TEXT NOT NULL,
+                            cont_sign TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            PRIMARY KEY (code, image_type)
+                        )
+                        """
+                    )
+                    conn.commit()
+            except sqlite3.Error as exc:
+                raise ImageIndexError("MAPPING_STORE_FAILED", f"初始化图片映射库失败: {exc}") from exc
+            self._initialized = True
+
+
+class BaiduImageSearchClient:
+    """封装百度商品图片搜索的最小 API 集。"""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        secret_key: str | None = None,
+        base_url: str | None = None,
+        transport=None,
+    ):
+        """默认读取配置，也允许测试注入 MockTransport。"""
+        self._api_key = api_key or settings.baidu_image_search_api_key
+        self._secret_key = secret_key or settings.baidu_image_search_secret_key
+        self._base_url = (base_url or settings.baidu_image_search_base_url).rstrip("/")
+        self._transport = transport
+        self._token_lock = Lock()
+        self._access_token = ""
+        self._access_token_expires_at = 0.0
+
+    def product_add(self, image_url: str, brief: str) -> str:
+        """按图片 URL 新增一张图片并返回 cont_sign。"""
+        payload = self._call_api(
+            "/rest/2.0/image-classify/v1/realtime_search/product/add",
+            data={
+                "url": image_url,
+                "brief": brief,
+            },
+            failure_code="IMAGE_UPLOAD_FAILED",
+        )
+        cont_sign = payload.get("cont_sign")
+        if not cont_sign:
+            raise ImageIndexError("IMAGE_UPLOAD_FAILED", "百度图片入库失败: 未返回 cont_sign")
+        return cont_sign
+
+    def product_update(self, cont_sign: str, brief: str) -> None:
+        """按 cont_sign 更新百度图库里的摘要信息。"""
+        self._call_api(
+            "/rest/2.0/image-classify/v1/realtime_search/product/update",
+            data={
+                "cont_sign": cont_sign,
+                "brief": brief,
+            },
+            failure_code="IMAGE_METADATA_UPDATE_FAILED",
+        )
+
+    def product_delete_by_sign(self, cont_signs: list[str]) -> None:
+        """按 cont_sign 删除百度图库中的图片。"""
+        self._call_api(
+            "/rest/2.0/image-classify/v1/realtime_search/product/delete",
+            data={"cont_sign": ",".join(cont_signs)},
+            failure_code="IMAGE_DELETE_FAILED",
+        )
+
+    def _call_api(self, path: str, data: dict[str, str], failure_code: str, retry_auth: bool = True) -> dict:
+        """统一处理 token、HTTP 请求和百度错误码。"""
+        token = self._get_access_token(force_refresh=False)
+        try:
+            with self._build_http_client() as client:
+                response = client.post(
+                    path,
+                    params={"access_token": token},
+                    data=data,
+                )
                 response.raise_for_status()
+                payload = response.json()
         except httpx.HTTPError as exc:
-            raise ImageIndexError("IMAGE_DOWNLOAD_FAILED", f"图片下载失败: {exc}") from exc
+            raise ImageIndexError(failure_code, f"百度图片搜索请求失败: {exc}") from exc
+        except ValueError as exc:
+            raise ImageIndexError(failure_code, "百度图片搜索返回了非 JSON 数据") from exc
 
-        if not response.content:
-            raise ImageIndexError("IMAGE_DOWNLOAD_FAILED", "图片下载失败: 响应内容为空")
-        return response.content
-
-    def _build_request(self, code: str, name: str, image_type: str, buffer: BytesIO):
-        """构造阿里云新增图片请求。"""
-        from alibabacloud_imagesearch20201214 import models as imagesearch_models
-
-        return imagesearch_models.AddImageAdvanceRequest(
-            instance_name=settings.aliyun_image_search_instance_name,
-            product_id=code,
-            pic_name=image_type,
-            pic_content_object=buffer,
-            custom_content=json.dumps(
-                {"code": code, "name": name, "image_type": image_type},
-                ensure_ascii=False,
-            ),
-        )
-
-    def _build_client(self):
-        """按当前配置创建阿里云图像搜索客户端。"""
-        from alibabacloud_tea_openapi import models as open_api_models
-        from alibabacloud_imagesearch20201214.client import Client as ImageSearchClient
-
-        endpoint = settings.aliyun_image_search_endpoint
-        if not endpoint:
-            endpoint = f"imagesearch.{settings.aliyun_image_search_region_id}.aliyuncs.com"
-
-        config = open_api_models.Config(
-            access_key_id=settings.aliyun_image_search_access_key_id,
-            access_key_secret=settings.aliyun_image_search_access_key_secret,
-            endpoint=endpoint,
-        )
-        return ImageSearchClient(config)
-
-    def _extract_payload(self, response) -> dict:
-        """兼容 SDK 不同返回对象形态，只抽取业务 body。"""
-        if hasattr(response, "body") and hasattr(response.body, "to_map"):
-            return response.body.to_map()
-        if hasattr(response, "to_map"):
-            payload = response.to_map()
-            if isinstance(payload.get("body"), dict):
-                return payload["body"]
+        error_code = payload.get("error_code")
+        if error_code is None:
             return payload
-        return {}
+
+        try:
+            numeric_error_code = int(error_code)
+        except (TypeError, ValueError):
+            numeric_error_code = None
+
+        if numeric_error_code in AUTH_ERROR_CODES and retry_auth:
+            self._get_access_token(force_refresh=True)
+            return self._call_api(path, data=data, failure_code=failure_code, retry_auth=False)
+
+        mapped_code = "AUTH_FAILED" if numeric_error_code in AUTH_ERROR_CODES else failure_code
+        error_message = payload.get("error_msg") or "未知错误"
+        raise ImageIndexError(mapped_code, f"百度图片搜索调用失败: [{error_code}] {error_message}")
+
+    def _get_access_token(self, force_refresh: bool) -> str:
+        """缓存 access_token，避免每张图片都重新换 token。"""
+        with self._token_lock:
+            if not force_refresh and self._access_token and time.time() < self._access_token_expires_at:
+                return self._access_token
+
+            if not self._api_key or not self._secret_key:
+                raise ImageIndexError("SETTINGS_MISSING", "缺少百度图片搜索配置: api_key 或 secret_key")
+
+            try:
+                with self._build_http_client() as client:
+                    response = client.get(
+                        "/oauth/2.0/token",
+                        params={
+                            "grant_type": "client_credentials",
+                            "client_id": self._api_key,
+                            "client_secret": self._secret_key,
+                        },
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+            except httpx.HTTPError as exc:
+                raise ImageIndexError("AUTH_FAILED", f"获取百度 access_token 失败: {exc}") from exc
+            except ValueError as exc:
+                raise ImageIndexError("AUTH_FAILED", "百度 access_token 接口返回了非 JSON 数据") from exc
+
+            access_token = payload.get("access_token")
+            expires_in = payload.get("expires_in")
+            if not access_token or not expires_in:
+                error_message = payload.get("error_description") or payload.get("error") or "未返回 access_token"
+                raise ImageIndexError("AUTH_FAILED", f"获取百度 access_token 失败: {error_message}")
+
+            self._access_token = access_token
+            self._access_token_expires_at = time.time() + int(expires_in) - 60
+            return self._access_token
+
+    def _build_http_client(self) -> httpx.Client:
+        """统一构造 HTTP 客户端，便于测试注入 transport。"""
+        client_kwargs = {
+            "base_url": self._base_url,
+            "timeout": 30.0,
+            "follow_redirects": True,
+        }
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+        return httpx.Client(**client_kwargs)
+
+
+class BaiduImageIndexer:
+    """把业务图片同步到百度图库，并维护本地 cont_sign 映射。"""
+
+    def __init__(
+        self,
+        client: BaiduImageSearchApi | None = None,
+        mapping_store: ImageIndexMappingStore | None = None,
+    ):
+        """默认使用真实百度客户端和 SQLite 映射表。"""
+        self._client = client or BaiduImageSearchClient()
+        self._mapping_store = mapping_store or SQLiteImageIndexMappingStore()
+
+    def upsert_image(self, item: ImageIndexItem) -> None:
+        """按 `(code, image_type)` 语义同步图片。"""
+        brief = _build_brief(item.code, item.name, item.image_type)
+        current_mapping = self._mapping_store.get_mapping(item.code, item.image_type)
+
+        if current_mapping is None:
+            self._create_mapping(item, brief)
+            return
+
+        if current_mapping.source_url == item.image_url:
+            if current_mapping.brief == brief:
+                return
+            self._client.product_update(current_mapping.cont_sign, brief)
+            self._mapping_store.upsert_mapping(
+                ImageIndexMapping(
+                    code=item.code,
+                    name=item.name,
+                    image_type=item.image_type,
+                    source_url=item.image_url,
+                    brief=brief,
+                    cont_sign=current_mapping.cont_sign,
+                    updated_at=_now_iso(),
+                )
+            )
+            return
+
+        self._replace_mapping(item, brief, current_mapping)
+
+    def _create_mapping(self, item: ImageIndexItem, brief: str) -> None:
+        """首次入库时直接把图片 URL 交给百度，再保存本地映射。"""
+        cont_sign = self._client.product_add(item.image_url, brief)
+        try:
+            self._mapping_store.upsert_mapping(
+                ImageIndexMapping(
+                    code=item.code,
+                    name=item.name,
+                    image_type=item.image_type,
+                    source_url=item.image_url,
+                    brief=brief,
+                    cont_sign=cont_sign,
+                    updated_at=_now_iso(),
+                )
+            )
+        except ImageIndexError:
+            self._rollback_new_image(cont_sign)
+            raise
+
+    def _replace_mapping(self, item: ImageIndexItem, brief: str, current_mapping: ImageIndexMapping) -> None:
+        """图片地址变化时，先用新 URL 新增，再删除旧图，最后更新映射。"""
+        new_cont_sign = self._client.product_add(item.image_url, brief)
+
+        try:
+            self._client.product_delete_by_sign([current_mapping.cont_sign])
+        except ImageIndexError as exc:
+            rollback_message = self._rollback_new_image(new_cont_sign)
+            raise ImageIndexError(
+                "IMAGE_DELETE_FAILED",
+                f"删除旧图片失败: {exc.message}{rollback_message}",
+            ) from exc
+
+        self._mapping_store.upsert_mapping(
+            ImageIndexMapping(
+                code=item.code,
+                name=item.name,
+                image_type=item.image_type,
+                source_url=item.image_url,
+                brief=brief,
+                cont_sign=new_cont_sign,
+                updated_at=_now_iso(),
+            )
+        )
+
+    def _rollback_new_image(self, cont_sign: str) -> str:
+        """删除刚刚新增的图片，尽量避免本地映射和远端图库漂移。"""
+        try:
+            self._client.product_delete_by_sign([cont_sign])
+        except ImageIndexError as exc:
+            return f"; 回滚新增图片失败: {exc.message}"
+        return ""
 
 
 class InventoryImageIndexTaskService:
     """异步图片入库任务服务。"""
 
-    def __init__(self, uploader: ImageUploader | None = None):
-        """默认使用阿里云上传器，也允许测试时注入假实现。"""
-        self._uploader = uploader or AliyunImageSearchUploader()
+    def __init__(self, indexer: ImageIndexer | None = None):
+        """默认使用百度实现，也允许测试注入假索引器。"""
+        self._indexer = indexer or BaiduImageIndexer()
         self._tasks: dict[str, ImageIndexTask] = {}
         self._lock = Lock()
 
@@ -255,12 +534,7 @@ class InventoryImageIndexTaskService:
 
         for item in task.items:
             try:
-                self._uploader.add_image(
-                    code=item.code,
-                    name=item.name,
-                    image_type=item.image_type,
-                    image_url=item.image_url,
-                )
+                self._indexer.upsert_image(item)
             except ImageIndexError as exc:
                 self._mark_failed(task_id=task_id, item=item, error_code=exc.code, error_message=exc.message)
                 continue

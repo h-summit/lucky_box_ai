@@ -16,12 +16,11 @@ class Settings(BaseSettings):
     vision_llm_api_key: str = ""
     vision_llm_model: str = ""
 
-    # 阿里云图像搜索配置
-    aliyun_image_search_access_key_id: str = ""
-    aliyun_image_search_access_key_secret: str = ""
-    aliyun_image_search_instance_name: str = ""
-    aliyun_image_search_region_id: str = ""
-    aliyun_image_search_endpoint: str = ""
+    # 百度图片搜索配置
+    baidu_image_search_api_key: str = ""
+    baidu_image_search_secret_key: str = ""
+    baidu_image_search_base_url: str = "https://aip.baidubce.com"
+    baidu_image_search_mapping_db_path: str = ".data/baidu_image_index.sqlite3"
 
     model_config = {"env_file": ".env"}
 

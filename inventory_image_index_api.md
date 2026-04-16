@@ -91,7 +91,7 @@
 3. 仅保留非空 URL 的图片记录。
 4. 每条图片记录的唯一键为 `(code, image_type)`。
 5. 如果同一个任务里出现重复的 `(code, image_type)`，只保留最后一条非空记录。
-6. 创建异步任务后立即返回，不等待阿里云入库完成。
+6. 创建异步任务后立即返回，不等待图片搜索入库完成。
 
 ### 5.5 响应体
 
@@ -157,8 +157,8 @@ HTTP 状态码建议使用 `202 Accepted`。
       "name": "宝可梦立牌",
       "image_type": "middle_package",
       "image_url": "https://example.com/images/0102250-middle.jpg",
-      "error_code": "ALIYUN_ADD_IMAGE_FAILED",
-      "error_message": "阿里云图片入库失败"
+      "error_code": "IMAGE_UPLOAD_FAILED",
+      "error_message": "百度图片入库失败"
     }
   ]
 }
@@ -266,8 +266,8 @@ HTTP 状态码建议使用 `202 Accepted`。
       "name": "宝可梦睡姿明盒",
       "image_type": "product",
       "image_url": "https://example.com/images/01028-product.jpg",
-      "error_code": "ALIYUN_ADD_IMAGE_FAILED",
-      "error_message": "阿里云图片入库失败"
+      "error_code": "IMAGE_UPLOAD_FAILED",
+      "error_message": "百度图片入库失败"
     }
   ]
 }
@@ -330,13 +330,13 @@ HTTP 状态码建议使用 `202 Accepted`。
 ]
 ```
 
-## 9. 与阿里云图像搜索的映射建议
+## 9. 与百度图片搜索的映射建议
 
 这一层是服务端内部实现建议，不暴露给调用方。
 
-- `ProductId` 建议使用商品 `code`
-- `PicName` 建议使用 `image_type`
-- `CustomContent` 建议保存最小业务元数据：
+- 建议把 `code`、`name`、`image_type` 写入 `brief`
+- 本地用 SQLite 保存 `(code, image_type) -> cont_sign`
+- 更新同一业务图片时，优先复用本地映射的 `cont_sign`
 
 ```json
 {
