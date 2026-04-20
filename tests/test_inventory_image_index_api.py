@@ -9,6 +9,7 @@ from app.image_index import (
     BaiduImageIndexer,
     ImageIndexError,
     ImageIndexItem,
+    InventoryImageDeleteService,
     InventoryImageIndexTaskService,
     SQLiteImageIndexMappingStore,
 )
@@ -73,10 +74,12 @@ class FakeBaiduClient:
             raise ImageIndexError("IMAGE_DELETE_FAILED", "删除百度图片失败")
 
 
-def _build_client(monkeypatch, indexer: FakeImageIndexer) -> TestClient:
-    """为每个测试注入独立任务服务，避免彼此串数据。"""
-    service = InventoryImageIndexTaskService(indexer=indexer)
+def _build_client(monkeypatch, indexer: FakeImageIndexer | None = None, delete_service=None) -> TestClient:
+    """为每个测试注入独立服务实例，避免彼此串数据。"""
+    service = InventoryImageIndexTaskService(indexer=indexer or FakeImageIndexer())
     monkeypatch.setattr("app.main.image_index_task_service", service)
+    if delete_service is not None:
+        monkeypatch.setattr("app.main.inventory_image_delete_service", delete_service)
     return TestClient(app)
 
 
@@ -235,6 +238,26 @@ def test_get_inventory_image_index_task_not_found(monkeypatch):
     assert response.json() == {"error": "task_id 不存在"}
 
 
+def test_delete_inventory_image_success(monkeypatch, mapping_store):
+    """删除单张图片时，应删除百度图库和本地映射。"""
+    fake_client = FakeBaiduClient(add_signs=["sign_product"])
+    indexer = BaiduImageIndexer(client=fake_client, mapping_store=mapping_store)
+    delete_service = InventoryImageDeleteService(client=fake_client, mapping_store=mapping_store)
+    indexer.upsert_image(ImageIndexItem("01028", "宝可梦睡姿明盒", "product", "https://example.com/01028-product.jpg"))
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.delete("/inventory_image_index/products/01028/images/product")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 1,
+        "deleted_image_types": ["product"],
+    }
+    assert mapping_store.get_mapping("01028", "product") is None
+    assert fake_client.delete_calls == [["sign_product"]]
+
+
 def test_create_inventory_image_index_task_requires_products(monkeypatch):
     """空商品数组应直接返回 400。"""
     client = _build_client(monkeypatch, FakeImageIndexer())
@@ -243,6 +266,21 @@ def test_create_inventory_image_index_task_requires_products(monkeypatch):
 
     assert response.status_code == 400
     assert response.json() == {"error": "products 不能为空"}
+
+
+def test_delete_inventory_image_is_idempotent_when_mapping_missing(monkeypatch, mapping_store):
+    """删除不存在的单张图片时，应按幂等成功返回。"""
+    delete_service = InventoryImageDeleteService(client=FakeBaiduClient(), mapping_store=mapping_store)
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.delete("/inventory_image_index/products/01028/images/product")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 0,
+        "deleted_image_types": [],
+    }
 
 
 @pytest.fixture
@@ -348,3 +386,56 @@ def test_baidu_indexer_reuses_mapping_across_store_instances(tmp_path):
     assert second_client.add_calls == []
     assert second_client.update_calls == []
     assert second_client.delete_calls == []
+
+def test_delete_inventory_image_rejects_invalid_image_type(monkeypatch, mapping_store):
+    """删除单张图片时，非法图片类型应直接返回 400。"""
+    delete_service = InventoryImageDeleteService(client=FakeBaiduClient(), mapping_store=mapping_store)
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.delete("/inventory_image_index/products/01028/images/invalid_type")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "image_type 不合法"}
+
+
+
+def test_delete_inventory_product_success(monkeypatch, mapping_store):
+    """删除整个商品时，应一次删除该商品下全部已入库图片。"""
+    fake_client = FakeBaiduClient(add_signs=["sign_product", "sign_small", "sign_middle"])
+    indexer = BaiduImageIndexer(client=fake_client, mapping_store=mapping_store)
+    delete_service = InventoryImageDeleteService(client=fake_client, mapping_store=mapping_store)
+    indexer.upsert_image(ImageIndexItem("01028", "宝可梦睡姿明盒", "product", "https://example.com/01028-product.jpg"))
+    indexer.upsert_image(ImageIndexItem("01028", "宝可梦睡姿明盒", "small_package", "https://example.com/01028-small.jpg"))
+    indexer.upsert_image(ImageIndexItem("01028", "宝可梦睡姿明盒", "middle_package", "https://example.com/01028-middle.jpg"))
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.delete("/inventory_image_index/products/01028")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 3,
+        "deleted_image_types": ["product", "small_package", "middle_package"],
+    }
+    assert mapping_store.get_mapping("01028", "product") is None
+    assert mapping_store.get_mapping("01028", "small_package") is None
+    assert mapping_store.get_mapping("01028", "middle_package") is None
+    assert fake_client.delete_calls == [["sign_product", "sign_small", "sign_middle"]]
+
+
+
+def test_delete_inventory_product_is_idempotent_when_mapping_missing(monkeypatch, mapping_store):
+    """删除整个商品时，商品不存在也应按幂等成功返回。"""
+    delete_service = InventoryImageDeleteService(client=FakeBaiduClient(), mapping_store=mapping_store)
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.delete("/inventory_image_index/products/01028")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 0,
+        "deleted_image_types": [],
+    }
+
+

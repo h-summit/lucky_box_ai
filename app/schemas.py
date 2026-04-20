@@ -109,3 +109,12 @@ class InventoryImageIndexTaskDetailResponse(BaseModel):
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     failed_items: list[InventoryImageIndexTaskFailedItem] = Field(default_factory=list)
+
+
+
+class InventoryImageDeleteResponse(BaseModel):
+    """删除图片接口的同步响应。"""
+
+    code: str
+    deleted_image_count: int
+    deleted_image_types: list[str] = Field(default_factory=list)

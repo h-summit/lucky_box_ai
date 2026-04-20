@@ -18,6 +18,8 @@ IMAGE_FIELD_TO_TYPE = {
     "small_package_picture_url": "small_package",
     "middle_package_picture_url": "middle_package",
 }
+IMAGE_TYPE_VALUES = tuple(IMAGE_FIELD_TO_TYPE.values())
+IMAGE_TYPE_ORDER = {image_type: index for index, image_type in enumerate(IMAGE_TYPE_VALUES)}
 AUTH_ERROR_CODES = {6, 13, 14, 15, 100, 110, 111}
 IMAGE_SEARCH_SCORE_THRESHOLD = 0.85
 IMAGE_SEARCH_TOP_N = 3
@@ -129,8 +131,14 @@ class ImageIndexMappingStore(Protocol):
     def get_mapping(self, code: str, image_type: str) -> ImageIndexMapping | None:
         """按业务主键读取当前映射。"""
 
+    def list_mappings_by_code(self, code: str) -> list[ImageIndexMapping]:
+        """读取某个商品当前全部图片映射。"""
+
     def upsert_mapping(self, mapping: ImageIndexMapping) -> None:
         """保存或覆盖当前映射。"""
+
+    def delete_mapping(self, code: str, image_type: str) -> None:
+        """按业务主键删除当前映射。"""
 
 
 class BaiduImageSearchApi(Protocol):
@@ -221,6 +229,35 @@ class SQLiteImageIndexMappingStore:
             updated_at=row[6],
         )
 
+    def list_mappings_by_code(self, code: str) -> list[ImageIndexMapping]:
+        """读取某个商品当前全部图片映射。"""
+        self._ensure_initialized()
+        try:
+            with self._lock, sqlite3.connect(self._db_path, timeout=30) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT code, name, image_type, source_url, brief, cont_sign, updated_at
+                    FROM baidu_image_index_mappings
+                    WHERE code = ?
+                    """,
+                    (code,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise ImageIndexError("MAPPING_STORE_FAILED", f"读取商品图片映射失败: {exc}") from exc
+
+        return [
+            ImageIndexMapping(
+                code=row[0],
+                name=row[1],
+                image_type=row[2],
+                source_url=row[3],
+                brief=row[4],
+                cont_sign=row[5],
+                updated_at=row[6],
+            )
+            for row in rows
+        ]
+
     def upsert_mapping(self, mapping: ImageIndexMapping) -> None:
         """保存或覆盖当前映射。"""
         self._ensure_initialized()
@@ -251,6 +288,22 @@ class SQLiteImageIndexMappingStore:
                 conn.commit()
         except sqlite3.Error as exc:
             raise ImageIndexError("MAPPING_STORE_FAILED", f"保存图片映射失败: {exc}") from exc
+
+    def delete_mapping(self, code: str, image_type: str) -> None:
+        """按业务主键删除当前映射。"""
+        self._ensure_initialized()
+        try:
+            with self._lock, sqlite3.connect(self._db_path, timeout=30) as conn:
+                conn.execute(
+                    """
+                    DELETE FROM baidu_image_index_mappings
+                    WHERE code = ? AND image_type = ?
+                    """,
+                    (code, image_type),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise ImageIndexError("MAPPING_STORE_FAILED", f"删除图片映射失败: {exc}") from exc
 
     def _ensure_initialized(self) -> None:
         """懒创建数据库和表，避免模块导入阶段就触发副作用。"""
@@ -600,6 +653,58 @@ class InventoryImageSearchService:
             "item_code": code,
             "item_name": name,
             "score": hit.score,
+        }
+
+
+def _sort_image_types(image_types: list[str]) -> list[str]:
+    """统一按固定图片类型顺序输出，保证响应稳定。"""
+    return sorted(image_types, key=lambda image_type: (IMAGE_TYPE_ORDER.get(image_type, len(IMAGE_TYPE_ORDER)), image_type))
+
+
+class InventoryImageDeleteService:
+    """同步删除商品图片及其本地映射。"""
+
+    def __init__(
+        self,
+        client: BaiduImageSearchApi | None = None,
+        mapping_store: ImageIndexMappingStore | None = None,
+    ):
+        """默认使用真实百度客户端和 SQLite 映射表。"""
+        self._client = client or BaiduImageSearchClient()
+        self._mapping_store = mapping_store or SQLiteImageIndexMappingStore()
+
+    def delete_image(self, code: str, image_type: str) -> dict:
+        """删除某个商品的一张图片，不存在时按幂等成功返回。"""
+        mapping = self._mapping_store.get_mapping(code, image_type)
+        if mapping is None:
+            return self._build_result(code, [])
+
+        self._client.product_delete_by_sign([mapping.cont_sign])
+        self._mapping_store.delete_mapping(code, image_type)
+        return self._build_result(code, [image_type])
+
+    def delete_product(self, code: str) -> dict:
+        """删除某个商品当前已入库的全部图片，不存在时按幂等成功返回。"""
+        mappings = self._mapping_store.list_mappings_by_code(code)
+        if not mappings:
+            return self._build_result(code, [])
+
+        sorted_mappings = sorted(
+            mappings,
+            key=lambda mapping: (IMAGE_TYPE_ORDER.get(mapping.image_type, len(IMAGE_TYPE_ORDER)), mapping.image_type),
+        )
+        self._client.product_delete_by_sign([mapping.cont_sign for mapping in sorted_mappings])
+        for mapping in sorted_mappings:
+            self._mapping_store.delete_mapping(mapping.code, mapping.image_type)
+        return self._build_result(code, [mapping.image_type for mapping in sorted_mappings])
+
+    def _build_result(self, code: str, deleted_image_types: list[str]) -> dict:
+        """统一构造删除接口的响应。"""
+        sorted_image_types = _sort_image_types(deleted_image_types)
+        return {
+            "code": code,
+            "deleted_image_count": len(sorted_image_types),
+            "deleted_image_types": sorted_image_types,
         }
 
 

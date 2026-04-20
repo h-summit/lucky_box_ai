@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from openai import APIError
 
-from app.image_index import ImageIndexError, InventoryImageIndexTaskService, InventoryImageSearchService
+from app.image_index import IMAGE_TYPE_VALUES, ImageIndexError, InventoryImageDeleteService, InventoryImageIndexTaskService, InventoryImageSearchService
 from app.llm import (
     analyze_intent,
     generate_customer_relationship_management,
@@ -18,6 +18,7 @@ from app.schemas import (
     CustomerRelationshipManagementRequest,
     GreetingsRequest,
     HolidayGreetingsRequest,
+    InventoryImageDeleteResponse,
     InventoryImageIndexTaskCreateRequest,
     InventoryImageIndexTaskCreateResponse,
     InventoryImageIndexTaskDetailResponse,
@@ -27,6 +28,7 @@ from app.schemas import (
 app = FastAPI(title="Lucky Box AI")
 image_index_task_service = InventoryImageIndexTaskService()
 inventory_image_search_service = InventoryImageSearchService()
+inventory_image_delete_service = InventoryImageDeleteService()
 INTENT_ORDER = {
     "query_logistics": 0,
     "query_shipping_progress": 1,
@@ -309,6 +311,35 @@ def get_inventory_image_index_task(task_id: str):
     if task is None:
         return _json_error(404, "task_id 不存在")
     return InventoryImageIndexTaskDetailResponse(**task)
+
+
+@app.delete(
+    "/inventory_image_index/products/{code}/images/{image_type}",
+    response_model=InventoryImageDeleteResponse,
+)
+def delete_inventory_image(code: str, image_type: str):
+    """同步删除某个商品的一张图片。"""
+    if image_type not in IMAGE_TYPE_VALUES:
+        return _json_error(400, "image_type 不合法")
+
+    try:
+        result = inventory_image_delete_service.delete_image(code, image_type)
+    except ImageIndexError as exc:
+        return _json_error(502, exc.message)
+    return InventoryImageDeleteResponse(**result)
+
+
+@app.delete(
+    "/inventory_image_index/products/{code}",
+    response_model=InventoryImageDeleteResponse,
+)
+def delete_inventory_product(code: str):
+    """同步删除某个商品当前全部已入库图片。"""
+    try:
+        result = inventory_image_delete_service.delete_product(code)
+    except ImageIndexError as exc:
+        return _json_error(502, exc.message)
+    return InventoryImageDeleteResponse(**result)
 
 
 @app.post("/greetings", response_model=ReplyResponse)
