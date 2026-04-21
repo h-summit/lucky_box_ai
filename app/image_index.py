@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 
 from app.config import settings
-from app.schemas import InventoryImageIndexProduct
+from app.schemas import InventoryImageDeleteProductRequest, InventoryImageIndexProduct
 
 IMAGE_FIELD_TO_TYPE = {
     "picture_url": "product",
@@ -23,6 +23,7 @@ IMAGE_TYPE_ORDER = {image_type: index for index, image_type in enumerate(IMAGE_T
 AUTH_ERROR_CODES = {6, 13, 14, 15, 100, 110, 111}
 IMAGE_SEARCH_SCORE_THRESHOLD = 0.85
 IMAGE_SEARCH_TOP_N = 3
+IMAGE_DELETE_RECOVERY_TOP_N = 10
 
 
 class ImageIndexError(Exception):
@@ -185,6 +186,16 @@ def _build_brief(code: str, name: str, image_type: str) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def _load_brief_data(brief: str) -> dict | None:
+    """统一解析百度 brief，避免不同链路重复写 JSON 解析逻辑。"""
+    try:
+        brief_data = json.loads(brief)
+    except json.JSONDecodeError:
+        return None
+
+    return brief_data if isinstance(brief_data, dict) else None
 
 
 def _now_iso() -> str:
@@ -636,12 +647,8 @@ class InventoryImageSearchService:
         if hit.score < IMAGE_SEARCH_SCORE_THRESHOLD:
             return None
 
-        try:
-            brief_data = json.loads(hit.brief)
-        except json.JSONDecodeError:
-            return None
-
-        if not isinstance(brief_data, dict):
+        brief_data = _load_brief_data(hit.brief)
+        if brief_data is None:
             return None
 
         code = brief_data.get("code")
@@ -683,20 +690,97 @@ class InventoryImageDeleteService:
         self._mapping_store.delete_mapping(code, image_type)
         return self._build_result(code, [image_type])
 
-    def delete_product(self, code: str) -> dict:
-        """删除某个商品当前已入库的全部图片，不存在时按幂等成功返回。"""
+    def delete_product(self, code: str, request: InventoryImageDeleteProductRequest | None = None) -> dict:
+        """删除某个商品当前已入库的全部图片，并在需要时补删远端残留图片。"""
         mappings = self._mapping_store.list_mappings_by_code(code)
-        if not mappings:
+        delete_targets = self._build_delete_targets(code, mappings, request)
+        if not delete_targets:
             return self._build_result(code, [])
 
-        sorted_mappings = sorted(
-            mappings,
-            key=lambda mapping: (IMAGE_TYPE_ORDER.get(mapping.image_type, len(IMAGE_TYPE_ORDER)), mapping.image_type),
+        mapping_by_sign = {mapping.cont_sign: mapping for mapping in mappings}
+        deleted_image_types = []
+
+        # 实测百度批量删除不稳定，这里改为逐个 cont_sign 删除，确保每张图都单独落到远端。
+        for target in delete_targets:
+            self._client.product_delete_by_sign([target["cont_sign"]])
+            deleted_image_types.append(target["image_type"])
+
+            mapping = mapping_by_sign.get(target["cont_sign"])
+            if mapping is not None:
+                self._mapping_store.delete_mapping(mapping.code, mapping.image_type)
+
+        return self._build_result(code, deleted_image_types)
+
+    def _build_delete_targets(
+        self,
+        code: str,
+        mappings: list[ImageIndexMapping],
+        request: InventoryImageDeleteProductRequest | None,
+    ) -> list[dict]:
+        """合并本地映射和搜图补查结果，得到本次应删除的唯一目标集合。"""
+        targets_by_sign: dict[str, dict] = {}
+
+        # 优先使用本地映射，因为这是最稳定且不依赖额外百度搜索的删除依据。
+        for mapping in mappings:
+            targets_by_sign[mapping.cont_sign] = {
+                "cont_sign": mapping.cont_sign,
+                "image_type": mapping.image_type,
+            }
+
+        for target in self._search_delete_targets(code, request):
+            current = targets_by_sign.get(target["cont_sign"])
+            if current is None or not current.get("image_type"):
+                targets_by_sign[target["cont_sign"]] = target
+
+        return sorted(
+            targets_by_sign.values(),
+            key=lambda target: (IMAGE_TYPE_ORDER.get(target["image_type"], len(IMAGE_TYPE_ORDER)), target["image_type"]),
         )
-        self._client.product_delete_by_sign([mapping.cont_sign for mapping in sorted_mappings])
-        for mapping in sorted_mappings:
-            self._mapping_store.delete_mapping(mapping.code, mapping.image_type)
-        return self._build_result(code, [mapping.image_type for mapping in sorted_mappings])
+
+    def _search_delete_targets(self, code: str, request: InventoryImageDeleteProductRequest | None) -> list[dict]:
+        """本地映射缺失时，用调用方提供的图片 URL 向百度反查待删 cont_sign。"""
+        if request is None:
+            return []
+
+        targets_by_sign: dict[str, dict] = {}
+        for image_ref in self._collect_request_image_refs(request):
+            for hit in self._client.product_search(image_ref, rn=IMAGE_DELETE_RECOVERY_TOP_N):
+                target = self._build_search_delete_target(code, hit)
+                if target is None:
+                    continue
+                current = targets_by_sign.get(target["cont_sign"])
+                if current is None or target["score"] > current["score"]:
+                    targets_by_sign[target["cont_sign"]] = target
+
+        return list(targets_by_sign.values())
+
+    def _collect_request_image_refs(self, request: InventoryImageDeleteProductRequest) -> list[str]:
+        """按固定字段顺序收集请求体中的图片 URL。"""
+        return [
+            image_ref
+            for image_ref in [
+                request.picture_url,
+                request.small_package_picture_url,
+                request.middle_package_picture_url,
+            ]
+            if image_ref
+        ]
+
+    def _build_search_delete_target(self, code: str, hit: BaiduProductSearchHit) -> dict | None:
+        """把搜图结果转换为可删除目标，只保留当前商品编码命中的结果。"""
+        if not hit.cont_sign:
+            return None
+
+        brief_data = _load_brief_data(hit.brief)
+        if brief_data is None or brief_data.get("code") != code:
+            return None
+
+        image_type = brief_data.get("image_type")
+        return {
+            "cont_sign": hit.cont_sign,
+            "image_type": image_type if isinstance(image_type, str) else "",
+            "score": hit.score,
+        }
 
     def _build_result(self, code: str, deleted_image_types: list[str]) -> dict:
         """统一构造删除接口的响应。"""

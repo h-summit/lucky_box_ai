@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.image_index import (
     BaiduImageIndexer,
+    BaiduProductSearchHit,
     ImageIndexError,
     ImageIndexItem,
     InventoryImageDeleteService,
@@ -43,12 +44,14 @@ class FakeImageIndexer:
 class FakeBaiduClient:
     """用于索引器测试的假百度客户端。"""
 
-    def __init__(self, add_signs=None, delete_failures=None):
+    def __init__(self, add_signs=None, delete_failures=None, search_hits=None):
         self._add_signs = list(add_signs or [])
         self._delete_failures = set(delete_failures or [])
+        self._search_hits = search_hits or {}
         self.add_calls = []
         self.update_calls = []
         self.delete_calls = []
+        self.search_calls = []
 
     def product_add(self, image_url: str, brief: str) -> str:
         """记录新增图片调用，并返回预设的 cont_sign。"""
@@ -72,6 +75,14 @@ class FakeBaiduClient:
         self.delete_calls.append(list(cont_signs))
         if any(cont_sign in self._delete_failures for cont_sign in cont_signs):
             raise ImageIndexError("IMAGE_DELETE_FAILED", "删除百度图片失败")
+
+    def product_search(self, image_ref: str, rn: int) -> list[BaiduProductSearchHit]:
+        """记录搜图调用，并返回测试预设的命中结果。"""
+        self.search_calls.append({
+            "image_ref": image_ref,
+            "rn": rn,
+        })
+        return list(self._search_hits.get(image_ref, []))
 
 
 def _build_client(monkeypatch, indexer: FakeImageIndexer | None = None, delete_service=None) -> TestClient:
@@ -420,7 +431,7 @@ def test_delete_inventory_product_success(monkeypatch, mapping_store):
     assert mapping_store.get_mapping("01028", "product") is None
     assert mapping_store.get_mapping("01028", "small_package") is None
     assert mapping_store.get_mapping("01028", "middle_package") is None
-    assert fake_client.delete_calls == [["sign_product", "sign_small", "sign_middle"]]
+    assert fake_client.delete_calls == [["sign_product"], ["sign_small"], ["sign_middle"]]
 
 
 
@@ -439,3 +450,83 @@ def test_delete_inventory_product_is_idempotent_when_mapping_missing(monkeypatch
     }
 
 
+def test_delete_inventory_product_recovers_remote_images_when_mapping_missing(monkeypatch, mapping_store):
+    """本地映射缺失时，应允许用请求体图片反查远端 cont_sign 后删除。"""
+    fake_client = FakeBaiduClient(search_hits={
+        "https://example.com/01028-product.jpg": [
+            BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"product"}', "sign_product"),
+            BaiduProductSearchHit(0.9, '{"code":"0102250","name":"宝可梦立牌","image_type":"product"}', "sign_other"),
+        ],
+        "https://example.com/01028-small.jpg": [
+            BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"small_package"}', "sign_small"),
+        ],
+        "https://example.com/01028-middle.jpg": [
+            BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"middle_package"}', "sign_middle"),
+        ],
+    })
+    delete_service = InventoryImageDeleteService(client=fake_client, mapping_store=mapping_store)
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.request(
+        "DELETE",
+        "/inventory_image_index/products/01028",
+        json={
+            "picture_url": "https://example.com/01028-product.jpg",
+            "small_package_picture_url": "https://example.com/01028-small.jpg",
+            "middle_package_picture_url": "https://example.com/01028-middle.jpg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 3,
+        "deleted_image_types": ["product", "small_package", "middle_package"],
+    }
+    assert fake_client.search_calls == [
+        {"image_ref": "https://example.com/01028-product.jpg", "rn": 10},
+        {"image_ref": "https://example.com/01028-small.jpg", "rn": 10},
+        {"image_ref": "https://example.com/01028-middle.jpg", "rn": 10},
+    ]
+    assert fake_client.delete_calls == [["sign_product"], ["sign_small"], ["sign_middle"]]
+
+
+def test_delete_inventory_product_merges_local_mapping_and_search_recovery(monkeypatch, mapping_store):
+    """本地只剩部分映射时，应把本地映射和搜图补查结果合并后一起删除。"""
+    fake_client = FakeBaiduClient(
+        add_signs=["sign_product"],
+        search_hits={
+            "https://example.com/01028-product.jpg": [
+                BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"product"}', "sign_product"),
+            ],
+            "https://example.com/01028-small.jpg": [
+                BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"small_package"}', "sign_small"),
+            ],
+            "https://example.com/01028-middle.jpg": [
+                BaiduProductSearchHit(1.0, '{"code":"01028","name":"宝可梦睡姿明盒","image_type":"middle_package"}', "sign_middle"),
+            ],
+        },
+    )
+    indexer = BaiduImageIndexer(client=fake_client, mapping_store=mapping_store)
+    delete_service = InventoryImageDeleteService(client=fake_client, mapping_store=mapping_store)
+    indexer.upsert_image(ImageIndexItem("01028", "宝可梦睡姿明盒", "product", "https://example.com/01028-product.jpg"))
+    client = _build_client(monkeypatch, delete_service=delete_service)
+
+    response = client.request(
+        "DELETE",
+        "/inventory_image_index/products/01028",
+        json={
+            "picture_url": "https://example.com/01028-product.jpg",
+            "small_package_picture_url": "https://example.com/01028-small.jpg",
+            "middle_package_picture_url": "https://example.com/01028-middle.jpg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "01028",
+        "deleted_image_count": 3,
+        "deleted_image_types": ["product", "small_package", "middle_package"],
+    }
+    assert mapping_store.get_mapping("01028", "product") is None
+    assert fake_client.delete_calls == [["sign_product"], ["sign_small"], ["sign_middle"]]

@@ -371,15 +371,35 @@ HTTP 状态码建议使用 `200 OK`。
 |---|---|---|---|
 | `code` | string | 是 | 商品编码 |
 
-### 8.3 服务端处理规则
+### 8.3 请求体（可选）
+
+当历史数据出现“百度远端还在，但本地 SQLite 映射已丢失”时，建议同时传入商品图片 URL，服务端会用这些图片向百度反查 `cont_sign` 后再删除远端图片。
+
+```json
+{
+  "picture_url": "https://example.com/images/01028-product.jpg",
+  "small_package_picture_url": "https://example.com/images/01028-small.jpg",
+  "middle_package_picture_url": "https://example.com/images/01028-middle.jpg"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `picture_url` | string \| null | 否 | 商品主图 URL，用于本地映射缺失时补查远端图片 |
+| `small_package_picture_url` | string \| null | 否 | 小包图 URL，用于本地映射缺失时补查远端图片 |
+| `middle_package_picture_url` | string \| null | 否 | 中包图 URL，用于本地映射缺失时补查远端图片 |
+
+### 8.4 服务端处理规则
 
 1. 先按 `code` 查询该商品当前全部图片映射。
-2. 如果没有任何映射，直接按幂等成功返回。
-3. 如果存在映射，则将该商品下全部命中的 `cont_sign` 一次性提交给百度删除。
-4. 百度删除成功后，再逐条删除本地 SQLite 映射。
-5. 整个接口同步执行，删除完成后再返回响应。
+2. 如果请求体带了图片 URL，服务端会额外用这些图片调用百度搜图，并筛出 `brief.code == 路径参数 code` 的命中结果。
+3. 本地映射和搜图补查结果会按 `cont_sign` 去重后合并。
+4. 如果合并后仍然没有任何待删目标，直接按幂等成功返回。
+5. 如果存在待删目标，则按目标顺序逐个调用百度删除对应 `cont_sign`。
+6. 每个 `cont_sign` 删除成功后，再删除本地 SQLite 中对应的映射（如果本地存在）。
+7. 整个接口同步执行，删除完成后再返回响应。
 
-### 8.4 成功响应
+### 8.5 成功响应
 
 HTTP 状态码建议使用 `200 OK`。
 
@@ -403,11 +423,21 @@ HTTP 状态码建议使用 `200 OK`。
 }
 ```
 
-### 8.5 响应字段说明
+当本地映射缺失，但通过请求体图片补删成功时：
+
+```json
+{
+  "code": "01028",
+  "deleted_image_count": 3,
+  "deleted_image_types": ["product", "small_package", "middle_package"]
+}
+```
+
+### 8.6 响应字段说明
 
 返回字段与“删除一个商品的某张图片”接口一致。
 
-### 8.6 失败响应
+### 8.7 失败响应
 
 百度删除失败或本地映射删除失败时，返回 `502 Bad Gateway`：
 

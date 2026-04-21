@@ -112,6 +112,14 @@ class InventoryImageIndexTaskDetailResponse(BaseModel):
 
 
 
+class InventoryImageDeleteProductRequest(BaseModel):
+    """整商品删除时可选传入的图片信息。"""
+
+    picture_url: Optional[str] = None
+    small_package_picture_url: Optional[str] = None
+    middle_package_picture_url: Optional[str] = None
+
+
 class InventoryImageDeleteResponse(BaseModel):
     """删除图片接口的同步响应。"""
 

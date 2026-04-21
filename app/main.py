@@ -1,7 +1,7 @@
 import json
 from typing import Callable
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse
 from openai import APIError
 
@@ -19,6 +19,7 @@ from app.schemas import (
     GreetingsRequest,
     HolidayGreetingsRequest,
     InventoryImageDeleteResponse,
+    InventoryImageDeleteProductRequest,
     InventoryImageIndexTaskCreateRequest,
     InventoryImageIndexTaskCreateResponse,
     InventoryImageIndexTaskDetailResponse,
@@ -333,10 +334,13 @@ def delete_inventory_image(code: str, image_type: str):
     "/inventory_image_index/products/{code}",
     response_model=InventoryImageDeleteResponse,
 )
-def delete_inventory_product(code: str):
+def delete_inventory_product(
+    code: str,
+    request: InventoryImageDeleteProductRequest | None = Body(default=None),
+):
     """同步删除某个商品当前全部已入库图片。"""
     try:
-        result = inventory_image_delete_service.delete_product(code)
+        result = inventory_image_delete_service.delete_product(code, request)
     except ImageIndexError as exc:
         return _json_error(502, exc.message)
     return InventoryImageDeleteResponse(**result)
